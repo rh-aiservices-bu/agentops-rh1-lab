@@ -1,0 +1,15 @@
+# Single stage — no Node build. The console is a polling dashboard, a chat
+# transcript and a scorecard; none of that needs a front-end framework, and
+# skipping it halves the build and the image across 30 tenants.
+FROM registry.access.redhat.com/ubi9/python-312:latest
+
+WORKDIR /opt/app-root/src
+COPY pyproject.toml ./
+COPY src/ ./src/
+RUN pip install --no-cache-dir .
+
+USER 1001
+EXPOSE 8080
+ENV PLANT_API_URL=http://plant-api:8080
+
+CMD ["uvicorn", "waterplant_ui.app:app", "--host", "0.0.0.0", "--port", "8080"]

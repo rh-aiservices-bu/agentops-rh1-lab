@@ -1,0 +1,19 @@
+# Built in CI for the cluster architecture only — never on a developer machine.
+# See implementation-plan.md §2.6.
+FROM registry.access.redhat.com/ubi9/python-312:latest
+
+WORKDIR /opt/app-root/src
+
+COPY pyproject.toml ./
+COPY src/ ./src/
+
+RUN pip install --no-cache-dir .
+
+# Runs unprivileged under the restricted-v2 SCC with a read-only root
+# filesystem. No capabilities, no host access — see §2.3.
+USER 1001
+
+EXPOSE 8080
+ENV PLANT_TICK_SECONDS=1.0
+
+CMD ["uvicorn", "plant_api.api:app", "--host", "0.0.0.0", "--port", "8080"]

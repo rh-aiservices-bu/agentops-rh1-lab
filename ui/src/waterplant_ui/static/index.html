@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Northgate Water Treatment Works — Operator Console</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="mast plate riveted">
+  <span class="screws"></span>
+  <div>
+    <span class="site engraved">Northgate Water Treatment Works</span>
+    <h1>Operator Console</h1>
+  </div>
+  <div class="mast-right">
+    <span class="tick" id="conn">connecting…</span>
+    <span class="lamp" id="lamp-live"></span>
+    <span class="lamp" id="lamp-alarm"></span>
+    <div class="status-box unknown" id="status-box">
+      <div>
+        <span class="k engraved">Plant status</span>
+        <span class="v" id="status-v">—</span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="grid">
+
+  <section class="plate riveted c6">
+    <span class="screws"></span>
+    <div class="plate-hd engraved">Reservoir &amp; Flows</div>
+    <div class="plate-bd">
+      <div class="reservoir">
+        <div class="gauge-wrap" id="g-reservoir"></div>
+        <div class="flow-rows">
+          <div class="flow-row"><span class="k engraved">Inflow</span>
+            <span class="lcd" id="inflow">—</span><span class="u">%/s</span></div>
+          <div class="flow-row"><span class="k engraved">Outflow</span>
+            <span class="lcd" id="outflow">—</span><span class="u">%/s</span></div>
+          <div class="flow-row"><span class="k engraved">Capacity</span>
+            <span class="lcd" id="capacity">—</span><span class="u">m³</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="plate riveted c6">
+    <span class="screws"></span>
+    <div class="plate-hd engraved">Water Quality</div>
+    <div class="plate-bd">
+      <div class="quality" id="quality"></div>
+    </div>
+  </section>
+
+  <section class="plate riveted c12">
+    <span class="screws"></span>
+    <div class="plate-hd engraved">Pumps</div>
+    <div class="plate-bd">
+      <div class="pumps" id="pumps"></div>
+    </div>
+  </section>
+
+  <section class="plate riveted c6">
+    <span class="screws"></span>
+    <div class="plate-hd engraved">Valves</div>
+    <div class="plate-bd">
+      <div class="valves" id="valves"></div>
+    </div>
+  </section>
+
+  <section class="plate riveted c6">
+    <span class="screws"></span>
+    <div class="plate-hd engraved">Safety Envelope
+      <span class="aside">Advisory — not enforced</span>
+    </div>
+    <div class="plate-bd">
+      <div class="checks" id="checks"></div>
+    </div>
+  </section>
+
+  <section class="plate riveted c12 chat-plate">
+    <span class="screws"></span>
+    <div class="plate-hd engraved">Maintenance Assistant
+      <select id="persona" class="persona" title="Requesting identity">
+        <option value="anonymous">Anonymous</option>
+        <option value="operator" selected>Plant Operator</option>
+        <option value="engineer">Maintenance Engineer</option>
+        <option value="administrator">Plant Administrator</option>
+      </select>
+    </div>
+    <div class="crt">
+      <div class="chat" id="chat"></div>
+    </div>
+    <form class="composer" id="composer">
+      <span class="sigil" id="sigil">operator@northgate ~ %</span>
+      <input id="prompt" autocomplete="off"
+             placeholder="why is pump 4 losing pressure?">
+      <button type="submit" id="send">Send</button>
+    </form>
+  </section>
+
+</main>
+
+<footer class="foot plate riveted">
+  <span class="screws"></span>
+  <span id="ns"></span>
+  <span>Simulated plant · all systems and data are fictional</span>
+  <a id="mlflow-link" href="#" hidden>MLflow traces →</a>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
