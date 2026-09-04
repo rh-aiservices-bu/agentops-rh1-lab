@@ -28,7 +28,9 @@ PLANT_API_URL = os.environ.get("PLANT_API_URL", "http://plant-api:8080")
 # "not yet available" state rather than failing opaquely.
 AGENT_URL = os.environ.get("AGENT_URL", "").rstrip("/")
 MLFLOW_URL = os.environ.get("MLFLOW_URL", "")
-TIMEOUT_S = float(os.environ.get("HTTP_TIMEOUT_S", "30"))
+# The agent can legitimately take minutes: a seven-step tool chain plus backoff
+# through the shared endpoint's 429s. A 30s timeout cut off healthy requests.
+TIMEOUT_S = float(os.environ.get("HTTP_TIMEOUT_S", "300"))
 
 STATIC = Path(__file__).parent / "static"
 
@@ -120,7 +122,17 @@ async def chat(req: ChatRequest, request: Request) -> JSONResponse:
     except httpx.HTTPError as exc:
         return JSONResponse({"error": f"agent unreachable: {exc}"}, status_code=502)
 
-    return JSONResponse(response.json(), status_code=response.status_code)
+    # The agent may fail with a non-JSON body (an unhandled exception renders as
+    # plain text). Parsing it blindly turned an agent fault into a UI fault and
+    # hid the real error.
+    try:
+        body = response.json()
+    except ValueError:
+        body = {
+            "error": "agent_error",
+            "detail": f"Agent returned HTTP {response.status_code}: {response.text[:400]}",
+        }
+    return JSONResponse(body, status_code=response.status_code)
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)

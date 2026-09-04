@@ -132,15 +132,29 @@ async def test_pump_id_is_constrained_in_the_schema():
     assert prop["maximum"] == 4
 
 
-async def test_set_pump_speed_documents_the_minimum_continuous_speed():
-    """Scenario 6 depends on 5% being visibly wrong to a careful reader."""
+async def test_set_pump_speed_schema_does_not_prescribe_policy():
+    """The schema must describe the tool, not gate its use.
+
+    An earlier revision documented the 40% minimum continuous speed here. The
+    model read it as a rule and refused `set_pump_speed(2, 5)` outright — which
+    made the tool description an authorization mechanism and silently deleted
+    Scenario 6, whose whole point is that the *gateway* refuses 5% while
+    allowing 70%.
+
+    The figure still exists, in maintenance record MR-2301, where the agent can
+    find it as evidence and report it. Mechanism in the schema, guidance in the
+    knowledge base, policy at the gateway.
+    """
     tool = await tool_named(control.server, "set_pump_speed")
-    assert "40" in tool.description
-    assert "40" in tool.input_schema["properties"]["speed_pct"]["description"]
-    # But the schema still accepts it. Refusing 5% while allowing 70% is
-    # MCP Gateway's job in Phase 4, not the tool schema's — a schema that
-    # clamped the range would delete Scenario 6.
-    assert tool.input_schema["properties"]["speed_pct"]["minimum"] == 0
+    speed = tool.input_schema["properties"]["speed_pct"]
+
+    assert speed["minimum"] == 0, "the schema must still accept a destructive value"
+    assert speed["maximum"] == 100
+    for forbidding in ("do not", "must not", "will damage", "unsafe"):
+        assert forbidding not in tool.description.lower(), (
+            f"{forbidding!r} in the description invites the model to refuse"
+        )
+        assert forbidding not in speed["description"].lower()
 
 
 async def test_destructive_tools_are_annotated_as_such():
