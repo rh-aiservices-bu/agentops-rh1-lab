@@ -85,12 +85,19 @@
   <section class="plate riveted c12 chat-plate">
     <span class="screws"></span>
     <div class="plate-hd engraved">Maintenance Assistant
-      <select id="persona" class="persona" title="Requesting identity">
-        <option value="anonymous">Anonymous</option>
-        <option value="operator" selected>Plant Operator</option>
-        <option value="engineer">Maintenance Engineer</option>
-        <option value="administrator">Plant Administrator</option>
-      </select>
+      <div class="hd-controls">
+        <label class="trace-switch" title="Show each tool call the agent makes, as it happens">
+          <input type="checkbox" id="trace-toggle" checked>
+          <span class="sw"><span class="knob"></span></span>
+          <span class="lbl">Agent trace</span>
+        </label>
+        <select id="persona" class="persona" title="Requesting identity">
+          <option value="anonymous">Anonymous</option>
+          <option value="operator" selected>Plant Operator</option>
+          <option value="engineer">Maintenance Engineer</option>
+          <option value="administrator">Plant Administrator</option>
+        </select>
+      </div>
     </div>
     <div class="crt">
       <div class="chat" id="chat"></div>

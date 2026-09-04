@@ -10,14 +10,15 @@ denial has to be attributable to the component that refused it.
 
 from __future__ import annotations
 
-from dataclasses import asdict
+import json
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import settings
 from .runtime import RateLimited, run
+from .streaming import run_stream
 
 app = FastAPI(title="Water Plant Maintenance Assistant", version="0.1.0")
 
@@ -66,4 +67,34 @@ async def chat(req: ChatRequest, request: Request) -> JSONResponse:
                 for r in result.tool_calls
             ],
         }
+    )
+
+
+@app.post("/chat/stream")
+async def chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
+    """Server-sent events for the same work as /chat.
+
+    /chat is kept for the evaluation harness and for anything that wants a
+    single result. The console uses this, because a seven-step tool chain is a
+    long time to show nothing — and because watching the tool calls land is the
+    point, not a progress bar.
+    """
+    token = request.headers.get("authorization")
+
+    async def events():
+        try:
+            async for event in run_stream(req.message, token=token):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as exc:  # never leave the stream hanging open
+            yield f'data: {json.dumps({"type": "error", "detail": str(exc)})}\n\n'
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            # The OpenShift router buffers by default, which would hold the
+            # whole stream back and defeat the point.
+            "X-Accel-Buffering": "no",
+        },
     )

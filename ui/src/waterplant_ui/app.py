@@ -19,7 +19,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -141,3 +141,44 @@ async def index() -> HTMLResponse:
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+
+@app.post("/api/chat/stream")
+async def chat_stream(req: ChatRequest, request: Request):
+    """Proxy the agent's SSE stream to the browser, unbuffered.
+
+    Forwards the caller's Authorization header exactly as /api/chat does. The
+    BFF adds nothing and decides nothing; it exists so the browser talks to one
+    origin.
+    """
+    if not AGENT_URL:
+        return JSONResponse(
+            {
+                "error": "agent_not_deployed",
+                "detail": "The maintenance agent is not deployed in this environment yet.",
+            },
+            status_code=503,
+        )
+
+    headers = {"accept": "text/event-stream"}
+    if auth := request.headers.get("authorization"):
+        headers["authorization"] = auth
+
+    async def relay():
+        try:
+            async with client().stream(
+                "POST",
+                f"{AGENT_URL}/chat/stream",
+                json={"message": req.message, "persona": req.persona},
+                headers=headers,
+            ) as upstream:
+                async for chunk in upstream.aiter_raw():
+                    yield chunk
+        except httpx.HTTPError as exc:
+            yield f'data: {{"type":"error","detail":"agent unreachable: {exc}"}}\n\n'.encode()
+
+    return StreamingResponse(
+        relay(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
