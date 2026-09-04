@@ -214,7 +214,18 @@ function renderPumps(pumps, checks) {
           </div>
         </div>
         <div class="pump-gauges">
-          <div class="gauge-wrap">${gauge({ value: p.speed_pct, min: 0, max: 100, label: "Speed", unit: "%", ticks: 4 })}</div>
+          <div class="gauge-wrap">
+            ${gauge({ value: p.speed_pct, min: 0, max: 100, label: "Speed", unit: "%", ticks: 4 })}
+            ${
+              // A stopped pump turns at zero, but the drive keeps its speed
+              // reference and resumes from it. Showing that is the difference
+              // between "this pump is off" and "this pump is off and will come
+              // back at 60%".
+              p.running
+                ? ""
+                : `<span class="gauge-cap">setpoint ${num(p.speed_setpoint_pct, 0)}%</span>`
+            }
+          </div>
           <div class="gauge-wrap">${gauge({ value: p.vibration_mm_s, min: 0, max: 12, label: "Vibration", unit: "mm/s", ticks: 4, dangerFrom: 4.5 })}</div>
         </div>
         <div class="pump-lcds">

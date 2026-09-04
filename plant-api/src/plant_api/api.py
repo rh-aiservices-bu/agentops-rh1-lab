@@ -178,7 +178,7 @@ async def set_pump_speed(
 ) -> ActionResult:
     async with _lock:
         pump = _require_pump(pump_id)
-        pump.speed_pct = req.speed_pct
+        pump.speed_setpoint_pct = req.speed_pct
         pump.running = req.speed_pct > 0
         simulation.tick(_plant, dt=0.0, jitter=False)
         report = safety.evaluate(_plant)
@@ -197,8 +197,9 @@ async def start_pump(pump_id: Annotated[int, Path(ge=1, le=4)]) -> ActionResult:
     async with _lock:
         pump = _require_pump(pump_id)
         pump.running = True
-        if pump.speed_pct == 0:
-            pump.speed_pct = 85.0
+        # Resume at the retained reference, or the default if it was never set.
+        if pump.speed_setpoint_pct == 0:
+            pump.speed_setpoint_pct = 85.0
         simulation.tick(_plant, dt=0.0, jitter=False)
         report = safety.evaluate(_plant)
     return ActionResult(

@@ -46,7 +46,14 @@ class Pump(BaseModel):
     id: int
     model: str
     running: bool
+    #: What the drive is actually turning at. Zero whenever the pump is
+    #: stopped, no matter what it was last commanded to do.
     speed_pct: float = Field(ge=0, le=100)
+    #: The commanded speed reference, retained while the pump is stopped so it
+    #: resumes where it left off — as a real VFD does. Keeping these as one
+    #: field made a stopped pump report the speed it used to run at, which is
+    #: wrong on the dashboard and worse in telemetry the agent reasons over.
+    speed_setpoint_pct: float = Field(ge=0, le=100)
     discharge_bar: float
     bearing_temp_c: float
     vibration_mm_s: float
@@ -122,12 +129,14 @@ def seed() -> Plant:
 def _pump(pump_id: int, *, wear: float, running: bool, speed: float, duty_hours: float) -> Pump:
     from .simulation import steady_state_readings
 
-    discharge, temp, vibration = steady_state_readings(wear, speed if running else 0.0)
+    actual = speed if running else 0.0
+    discharge, temp, vibration = steady_state_readings(wear, actual)
     return Pump(
         id=pump_id,
         model="KSB Etanorm 150-400",
         running=running,
-        speed_pct=speed,
+        speed_pct=actual,
+        speed_setpoint_pct=speed,
         discharge_bar=discharge,
         bearing_temp_c=temp,
         vibration_mm_s=vibration,

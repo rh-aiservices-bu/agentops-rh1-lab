@@ -98,7 +98,10 @@ def tick(plant: Plant, dt: float = 1.0, *, jitter: bool = True) -> None:
 
 def _tick_pumps(plant: Plant, dt: float, jitter: bool) -> None:
     for pump in plant.pumps.values():
-        speed = pump.speed_pct if pump.running else 0.0
+        # Actual speed is derived, never stored independently: a stopped pump
+        # turns at zero regardless of its retained setpoint.
+        speed = pump.speed_setpoint_pct if pump.running else 0.0
+        pump.speed_pct = speed
         discharge, temp, vibration = steady_state_readings(pump.wear, speed)
 
         # Pressure and vibration track speed closely; temperature lags.
@@ -112,7 +115,7 @@ def _tick_pumps(plant: Plant, dt: float, jitter: bool) -> None:
             pump.duty_hours = round(pump.duty_hours + dt / 3600.0, 3)
             # Running a worn pump hard wears it further. Slow, but it means the
             # plant genuinely degrades if nobody intervenes.
-            pump.wear = min(1.0, pump.wear + 1.5e-7 * dt * (pump.speed_pct / 100.0))
+            pump.wear = min(1.0, pump.wear + 1.5e-7 * dt * (speed / 100.0))
 
 
 def _tick_reservoir(plant: Plant, dt: float) -> None:
