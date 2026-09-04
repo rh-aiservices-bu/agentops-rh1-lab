@@ -14,6 +14,18 @@
 const POLL_MS = 1000;
 const $ = (id) => document.getElementById(id);
 
+/* Auto-scroll only when the reader is already at the foot of the buffer.
+ *
+ * Without this, a streaming answer drags the view down while someone is
+ * scrolled up reading an earlier tool call — which is precisely when they are
+ * most likely to be checking what the agent actually did. */
+const STICK_SLACK_PX = 56;
+const isPinned = (el) =>
+  el.scrollHeight - el.scrollTop - el.clientHeight < STICK_SLACK_PX;
+const stick = (el, wasPinned) => {
+  if (wasPinned) el.scrollTop = el.scrollHeight;
+};
+
 let agentAvailable = false;
 
 /* Whether to render the live MCP tool trace.
@@ -296,6 +308,7 @@ function personaSlug() {
    re-parked at the foot of the buffer after every write. */
 function addMessage(role, text) {
   const chat = $("chat");
+  const pinned = isPinned(chat);
   chat.querySelector(".cursor-line")?.remove();
 
   const line = document.createElement("p");
@@ -327,7 +340,7 @@ function addMessage(role, text) {
   cur.appendChild(blk);
   chat.appendChild(cur);
 
-  chat.scrollTop = chat.scrollHeight;
+  stick(chat, pinned);
 }
 
 /* Streamed request.
@@ -351,6 +364,7 @@ async function ask(event) {
   let replyLine = null;
 
   const write = (text) => {
+    const pinned = isPinned(chat);
     if (!replyLine) {
       chat.querySelector(".cursor-line")?.remove();
       replyLine = document.createElement("p");
@@ -362,17 +376,18 @@ async function ask(event) {
       chat.appendChild(replyLine);
     }
     replyLine.appendChild(document.createTextNode(text));
-    chat.scrollTop = chat.scrollHeight;
+    stick(chat, pinned);
   };
 
   const trace = (cls, text) => {
     if (!showTrace) return;
+    const pinned = isPinned(chat);
     chat.querySelector(".cursor-line")?.remove();
     const el = document.createElement("p");
     el.className = `line trace ${cls}`;
     el.textContent = text;
     chat.appendChild(el);
-    chat.scrollTop = chat.scrollHeight;
+    stick(chat, pinned);
     replyLine = null; // a tool call ends the current prose run
   };
 
@@ -447,6 +462,8 @@ async function ask(event) {
     blk.className = "cursor";
     cur.appendChild(blk);
     chat.appendChild(cur);
+    // Always return to the foot when a turn completes: the answer is finished
+    // and the prompt is waiting.
     chat.scrollTop = chat.scrollHeight;
 
     $("send").disabled = !agentAvailable;
