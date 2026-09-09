@@ -1,4 +1,3 @@
-# One image, three servers. Built in CI for the cluster architecture only.
 FROM registry.access.redhat.com/ubi9/python-312:latest
 
 WORKDIR /opt/app-root/src
@@ -10,6 +9,4 @@ USER 1001
 EXPOSE 8080
 ENV MCP_PORT=8080 PLANT_API_URL=http://plant-api:8080
 
-# Overridden per Deployment: telemetry | maintenance | control
-ENTRYPOINT ["python", "-m", "waterplant_mcp"]
-CMD ["telemetry"]
+ENTRYPOINT ["python", "-m", "maintenance_mcp"]

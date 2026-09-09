@@ -1,0 +1,16 @@
+# The RHBK operator creates an Ingress but not an OpenShift Route.
+# This Route exposes Keycloak externally with edge TLS termination.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: keycloak
+  namespace: wp-dev
+spec:
+  to:
+    kind: Service
+    name: keycloak-service
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

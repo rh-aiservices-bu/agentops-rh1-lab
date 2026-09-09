@@ -1,0 +1,59 @@
+# Tool-level authorization policy on the internal 'mcps' listener.
+#
+# This policy is universal — the CEL expression checks resource_access claims
+# regardless of which realm issued the token.  No changes are needed when
+# adding new participants; only add-participant.sh (auth side) is required.
+#
+# The 'authentication' section re-validates the JWT on the internal listener.
+# Add one entry per participant realm (same as in authpolicy-auth.yaml).
+# The add-participant.sh script patches both policies automatically.
+#
+# Authorization logic:
+#   A tool call is allowed when the user's JWT contains:
+#     resource_access[<x-mcp-servername>].roles includes "tool:<x-mcp-toolname>"
+#
+#   x-mcp-servername matches the Keycloak client ID (e.g. "wp-dev/telemetry-mcp").
+#   x-mcp-toolname  is the exact tool function name (e.g. "get_pump_status").
+apiVersion: kuadrant.io/v1
+kind: AuthPolicy
+metadata:
+  name: mcp-authz-policy
+  namespace: mcp-gateway
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: mcp-gateway
+    sectionName: mcps
+  rules:
+    authentication:
+      anonymous:
+        anonymous: {}
+        when:
+          - predicate: '!request.headers.exists(h, h == "x-mcp-toolname")'
+      # Add one entry per participant realm via add-participant.sh:
+      # waterplant-<name>:
+      #   jwt:
+      #     issuerUrl: https://keycloak-wp-dev.apps.caiprod.rhoai.rh-aiservices-bu.com/realms/waterplant-<name>
+      #   when:
+      #     - predicate: 'request.headers.exists(h, h == "x-mcp-toolname")'
+    authorization:
+      "tool-access-check":
+        when:
+          - predicate: "request.headers.exists(h, h == 'x-mcp-toolname')"
+          - predicate: "request.headers['x-mcp-method'] == 'tools/call'"
+        patternMatching:
+          patterns:
+            - predicate: |
+                ('tool:' + request.headers['x-mcp-toolname']) in (has(auth.identity.resource_access) && auth.identity.resource_access.exists(p, p == request.headers['x-mcp-servername']) ? auth.identity.resource_access[request.headers['x-mcp-servername']].roles : [])
+    response:
+      unauthorized:
+        body:
+          value: |
+            {
+              "jsonrpc": "2.0",
+              "error": {
+                "code": -32600,
+                "message": "Forbidden: Insufficient permissions for this tool."
+              }
+            }
