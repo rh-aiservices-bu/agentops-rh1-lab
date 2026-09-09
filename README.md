@@ -122,6 +122,16 @@ returns server-sent events and is what the console uses — the tool calls appea
 as they fire, which is how a participant sees what the agent *did* separately
 from what it *says* it did.
 
+**The conversation is held by the console, not the agent.** Both take a
+`history` of prior turns and replay it; neither keeps session state. That
+preserves `plant-api` as the only stateful pod per participant, keeps reset a
+single call, and means the agent needs no sticky routing. It also means the
+transcript is client-supplied and therefore forgeable — a caller can claim the
+assistant said anything. That is consistent with the rest of the design, since
+the agent is not an authorization boundary and its tool calls are authorized on
+their own merits, but it is worth stating plainly: **the transcript is not the
+audit record. The trace is.**
+
 ### Swapping the harness
 
 BYOA is the premise, so the harness is a chart value. Setting `agent.harness`
@@ -182,7 +192,7 @@ turning the speed down and walking away.
 ## Running the tests
 
 Pure logic, no containers and no networking, so they behave identically on a
-laptop and in CI. **65 tests.** Python 3.12+ is required; the packages are
+laptop and in CI. **72 tests.** Python 3.12+ is required; the packages are
 hatchling-only, so a virtualenv built on an older interpreter cannot install
 them editable at all.
 

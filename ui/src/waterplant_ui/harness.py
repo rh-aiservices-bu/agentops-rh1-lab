@@ -43,6 +43,9 @@ AGENT_API_KEY = os.environ.get("AGENT_API_KEY", "")
 #: The `model` field an OpenAI-compatible server expects. Hermes ignores the
 #: value beyond requiring one, but a wrong name is a confusing 4xx.
 AGENT_MODEL = os.environ.get("AGENT_MODEL", "hermes-agent")
+#: How many prior turns the console may replay. An unbounded transcript
+#: eventually walks into the model's context limit mid-workshop.
+MAX_HISTORY_TURNS = int(os.environ.get("AGENT_MAX_HISTORY_TURNS", "20"))
 
 _NO_TRACE = (
     "harness does not expose tool calls — plant readings below are the "
@@ -71,18 +74,40 @@ def headers_for(caller_auth: str | None, *, sse: bool = False) -> dict[str, str]
     return headers
 
 
-def request(url: str, message: str, persona: str, *, stream: bool) -> tuple[str, dict]:
-    """The (path, body) this harness expects for one turn."""
+def request(
+    url: str,
+    message: str,
+    persona: str,
+    history: list[dict[str, str]] | None = None,
+    *,
+    stream: bool,
+) -> tuple[str, dict]:
+    """The (path, body) this harness expects for one turn.
+
+    Neither harness keeps session state, so the conversation is replayed on
+    every turn. Without it a follow-up lands with nothing to follow: "check
+    pump 3, make sure it's running" is answered and offers to start it, then
+    "yes" arrives cold and gets "Hello! How can I assist you today?"
+
+    The two protocols want it in different places — an OpenAI server takes prior
+    turns inline in `messages`, ours takes them beside the new question — which
+    is the entire reason this is a function and not a template.
+    """
+    turns = [
+        {"role": t["role"], "content": t["content"]}
+        for t in (history or [])[-MAX_HISTORY_TURNS:]
+        if t.get("role") in ("user", "assistant") and t.get("content")
+    ]
     if PROTOCOL == "openai":
         body: dict[str, Any] = {
             "model": AGENT_MODEL,
-            "messages": [{"role": "user", "content": message}],
+            "messages": [*turns, {"role": "user", "content": message}],
         }
         if stream:
             body["stream"] = True
         return f"{url}/v1/chat/completions", body
     path = f"{url}/chat/stream" if stream else f"{url}/chat"
-    return path, {"message": message, "persona": persona}
+    return path, {"message": message, "persona": persona, "history": turns}
 
 
 def translate_reply(body: dict) -> dict:
@@ -113,10 +138,11 @@ async def relay_stream(
     url: str,
     message: str,
     persona: str,
+    history: list[dict[str, str]] | None,
     caller_auth: str | None,
 ) -> AsyncIterator[bytes]:
     """One turn as this console's server-sent events, whatever the harness is."""
-    target, body = request(url, message, persona, stream=True)
+    target, body = request(url, message, persona, history, stream=True)
     headers = headers_for(caller_auth, sse=True)
 
     if PROTOCOL != "openai":

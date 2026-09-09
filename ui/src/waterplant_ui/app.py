@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import FastAPI, Request
@@ -90,9 +90,22 @@ async def _gather(*paths: str) -> list[Any]:
     return out
 
 
+class Turn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
 class ChatRequest(BaseModel):
     message: str
     persona: str = "operator"
+    #: The conversation so far, sent by the console. Neither the BFF nor the
+    #: agent keeps session state; the transcript lives where it is already
+    #: rendered. See waterplant_ui.harness for how each protocol replays it.
+    history: list[Turn] = []
+
+
+def _history(req: ChatRequest) -> list[dict[str, str]]:
+    return [turn.model_dump() for turn in req.history]
 
 
 @app.post("/api/chat")
@@ -118,7 +131,9 @@ async def chat(req: ChatRequest, request: Request) -> JSONResponse:
             status_code=503,
         )
 
-    target, payload = harness.request(AGENT_URL, req.message, req.persona, stream=False)
+    target, payload = harness.request(
+        AGENT_URL, req.message, req.persona, _history(req), stream=False
+    )
     headers = harness.headers_for(request.headers.get("authorization"))
 
     try:
@@ -172,6 +187,7 @@ async def chat_stream(req: ChatRequest, request: Request):
             AGENT_URL,
             req.message,
             req.persona,
+            _history(req),
             request.headers.get("authorization"),
         ),
         media_type="text/event-stream",
