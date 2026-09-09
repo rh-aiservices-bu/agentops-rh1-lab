@@ -48,7 +48,11 @@
   --phos: #ffb63c;
   --phos-dim: #b9761b;
   --phos-hot: #ffd79a;
+  --phos-glow: 255, 182, 60;   /* rgb triple, used in glows */
   --crt-bg: #170d04;
+  --crt-inner: #241505;
+  --crt-edge: #0b0602;
+  --crt-bloom: 255, 140, 0;
 
   /* Grime overlay reused across every panel surface. */
   --noise: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='220'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
@@ -322,7 +326,7 @@ body {
   text-transform: uppercase;
   background: var(--crt-bg); color: var(--phos);
   border: 1px solid rgba(0,0,0,.8); border-radius: 2px; padding: 2px 8px;
-  box-shadow: inset 0 2px 6px rgba(0,0,0,.9), 0 0 8px rgba(255,182,60,.18);
+  box-shadow: inset 0 2px 6px rgba(0,0,0,.9), 0 0 8px rgba(var(--phos-glow), .18);
 }
 
 /* The screen itself, recessed behind a bezel. */
@@ -332,11 +336,11 @@ body {
      scrolls instead of the screen — so there is no scrollbar to style. */
   height: clamp(280px, 44vh, 560px);
   position: relative; margin: 16px 20px; border-radius: 10px;
-  background: radial-gradient(120% 130% at 50% 40%, #241505 0%, var(--crt-bg) 60%, #0b0602 100%);
+  background: radial-gradient(120% 130% at 50% 40%, var(--crt-inner) 0%, var(--crt-bg) 60%, var(--crt-edge) 100%);
   border: 1px solid #000;
   box-shadow:
     inset 0 0 70px rgba(0,0,0,.95),
-    inset 0 0 14px rgba(255,140,0,.10),
+    inset 0 0 14px rgba(var(--crt-bloom), .10),
     inset 0 2px 0 rgba(255,255,255,.05),
     0 0 0 6px #16232a,
     0 0 0 7px rgba(0,0,0,.7),
@@ -364,7 +368,7 @@ body {
   padding: 16px 20px 20px;
   font-family: var(--crt); font-size: 1.22rem; line-height: 1.42;
   color: var(--phos); letter-spacing: .02em;
-  text-shadow: 0 0 4px rgba(255,182,60,.55), 0 0 14px rgba(255,120,0,.28);
+  text-shadow: 0 0 4px rgba(var(--phos-glow), .55), 0 0 14px rgba(var(--crt-bloom), .28);
   animation: flicker 5.5s infinite steps(1);
 }
 @keyframes flicker {
@@ -384,7 +388,7 @@ body {
 /* Block cursor, parked on its own line at the foot of the buffer. */
 .cursor {
   display: inline-block; width: .6em; height: 1.05em; vertical-align: -.15em;
-  background: var(--phos); box-shadow: 0 0 8px rgba(255,182,60,.8);
+  background: var(--phos); box-shadow: 0 0 8px rgba(var(--phos-glow), .8);
   animation: blink 1.05s steps(1) infinite;
 }
 @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
@@ -398,12 +402,12 @@ body {
 }
 .composer .sigil {
   font-family: var(--crt); font-size: 1.15rem; color: var(--phos-dim);
-  text-shadow: 0 0 6px rgba(255,182,60,.4); white-space: nowrap;
+  text-shadow: 0 0 6px rgba(var(--phos-glow), .4); white-space: nowrap;
 }
 .composer input {
   flex: 1; background: transparent; border: 0; outline: 0; padding: 2px 0;
   font-family: var(--crt); font-size: 1.18rem; letter-spacing: .02em;
-  color: var(--phos-hot); text-shadow: 0 0 5px rgba(255,182,60,.5);
+  color: var(--phos-hot); text-shadow: 0 0 5px rgba(var(--phos-glow), .5);
 }
 .composer input::placeholder { color: #6d4a1c; }
 .composer button {
@@ -411,7 +415,7 @@ body {
   text-transform: uppercase; cursor: pointer; padding: 3px 16px; border-radius: 2px;
   color: var(--crt-bg); border: 1px solid rgba(0,0,0,.6);
   background: linear-gradient(180deg, var(--phos-hot), var(--phos-dim));
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 0 10px rgba(255,182,60,.25);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.35), 0 0 10px rgba(var(--phos-glow), .25);
 }
 .composer button:disabled {
   background: linear-gradient(180deg, #3a2c17, #1d150a);
@@ -442,7 +446,7 @@ body {
    can follow what it is doing. */
 .line.trace { font-size: 1.06rem; letter-spacing: .01em; margin-bottom: 3px; }
 .line.trace.dim  { color: var(--phos-dim); }
-.line.trace.call { color: var(--phos); text-shadow: 0 0 6px rgba(255,182,60,.5); }
+.line.trace.call { color: var(--phos); text-shadow: 0 0 6px rgba(var(--phos-glow), .5); }
 .line.trace.ok   { color: var(--phos-dim); padding-left: 1.4em; }
 .line.trace.err  { color: #ff8b4a; padding-left: 1.4em; text-shadow: 0 0 8px rgba(255,107,42,.45); }
 
@@ -474,7 +478,7 @@ body {
 .trace-switch input:checked + .sw .knob {
   left: 19px;
   background: radial-gradient(circle at 35% 30%, #ffe1a8, var(--phos) 55%, #9a6408);
-  box-shadow: 0 0 8px rgba(255,182,60,.75);
+  box-shadow: 0 0 8px rgba(var(--phos-glow), .75);
 }
 .trace-switch input:checked ~ .lbl { color: var(--phos); }
 .trace-switch input:focus-visible + .sw { outline: 2px solid var(--phos); outline-offset: 2px; }
@@ -496,15 +500,76 @@ body {
 .chat::-webkit-scrollbar { width: 11px; }
 .chat::-webkit-scrollbar-track {
   background: rgba(0, 0, 0, .55);
-  border-left: 1px solid rgba(255, 182, 60, .14);
+  border-left: 1px solid rgba(var(--phos-glow), .14);
 }
 .chat::-webkit-scrollbar-thumb {
   border-radius: 6px;
   border: 2px solid transparent;
   background: linear-gradient(180deg, var(--phos), var(--phos-dim)) padding-box;
-  box-shadow: 0 0 8px rgba(255, 182, 60, .45);
+  box-shadow: 0 0 8px rgba(var(--phos-glow), .45);
 }
 .chat::-webkit-scrollbar-thumb:hover {
   background: linear-gradient(180deg, var(--phos-hot), var(--phos)) padding-box;
-  box-shadow: 0 0 12px rgba(255, 182, 60, .7);
+  box-shadow: 0 0 12px rgba(var(--phos-glow), .7);
 }
+
+
+/* ── phosphor selection ──────────────────────────────────
+ * Amber is the default. Green is the other classic. "Off" is not a third
+ * colour — it turns the CRT simulation off entirely: no scanlines, no
+ * vignette, no bloom, no flicker. Someone projecting this to a room, or
+ * reading it for a long stretch, should be able to get a flat legible screen.
+ */
+:root[data-phosphor="green"] {
+  --phos: #52ff8f;
+  --phos-dim: #239c55;
+  --phos-hot: #c9ffdc;
+  --phos-glow: 82, 255, 143;
+  --crt-bg: #04140a;
+  --crt-inner: #0a2411;
+  --crt-edge: #020a05;
+  --crt-bloom: 40, 220, 110;
+}
+
+:root[data-phosphor="off"] {
+  --phos: #dfe7e6;
+  --phos-dim: #8d9a99;
+  --phos-hot: #ffffff;
+  --phos-glow: 223, 231, 230;
+  --crt-bg: #0b1416;
+  --crt-inner: #12202a;
+  --crt-edge: #070e10;
+  --crt-bloom: 120, 150, 155;
+}
+:root[data-phosphor="off"] .crt::before,
+:root[data-phosphor="off"] .crt::after { display: none; }
+:root[data-phosphor="off"] .crt {
+  background: linear-gradient(180deg, #101c20, #080f11);
+  box-shadow:
+    inset 0 2px 8px rgba(0,0,0,.7),
+    0 0 0 6px #16232a, 0 0 0 7px rgba(0,0,0,.7), 0 6px 18px rgba(0,0,0,.6);
+}
+:root[data-phosphor="off"] .chat { animation: none; text-shadow: none; }
+:root[data-phosphor="off"] .cursor { box-shadow: none; }
+:root[data-phosphor="off"] .line.trace.call,
+:root[data-phosphor="off"] .line.trace.err { text-shadow: none; }
+:root[data-phosphor="off"] .composer input { text-shadow: none; }
+
+/* The cycle button itself. */
+.phosphor-btn {
+  display: flex; align-items: center; gap: 7px; cursor: pointer;
+  font-family: var(--display); font-size: .62rem; letter-spacing: .16em;
+  text-transform: uppercase; color: var(--label-dim); white-space: nowrap;
+  background: var(--lcd-bg); border: 1px solid rgba(0,0,0,.7);
+  border-radius: 2px; padding: 4px 9px;
+  box-shadow: inset 0 2px 5px rgba(0,0,0,.8);
+}
+.phosphor-btn:hover { color: var(--label); }
+.phosphor-btn:focus-visible { outline: 2px solid var(--phos); outline-offset: 2px; }
+.phosphor-btn .dot {
+  width: 10px; height: 10px; border-radius: 50%; flex: none;
+  background: var(--phos);
+  box-shadow: 0 0 8px rgba(var(--phos-glow), .8), inset 0 -1px 2px rgba(0,0,0,.4);
+}
+:root[data-phosphor="off"] .phosphor-btn .dot { box-shadow: inset 0 -1px 2px rgba(0,0,0,.4); }
+@media (max-width: 980px) { .phosphor-btn .lbl { display: none; } }

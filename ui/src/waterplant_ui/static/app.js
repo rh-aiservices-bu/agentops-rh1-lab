@@ -41,6 +41,27 @@ try {
   /* private window or blocked storage: keep the default */
 }
 
+/* Terminal phosphor. "off" is not a third colour — it disables the CRT
+ * simulation entirely, for projecting to a room or reading for a long
+ * stretch. Persisted per browser, best-effort. */
+const PHOSPHORS = ["amber", "green", "off"];
+const PHOSPHOR_LABEL = { amber: "Amber", green: "Green", off: "Effects off" };
+let phosphor = "amber";
+try {
+  const saved = localStorage.getItem("wp.phosphor");
+  if (PHOSPHORS.includes(saved)) phosphor = saved;
+} catch {
+  /* keep the default */
+}
+
+function applyPhosphor() {
+  // Amber is the stylesheet default, so it carries no attribute.
+  if (phosphor === "amber") delete document.documentElement.dataset.phosphor;
+  else document.documentElement.dataset.phosphor = phosphor;
+  const label = $("phosphor-label");
+  if (label) label.textContent = PHOSPHOR_LABEL[phosphor];
+}
+
 const num = (v, d = 1) => (v === null || v === undefined ? "—" : Number(v).toFixed(d));
 
 function statusOf(checks, subject, metric) {
@@ -485,6 +506,17 @@ async function ask(event) {
 /* ── boot ────────────────────────────────────────────────── */
 (async function init() {
   $("composer").addEventListener("submit", ask);
+
+  applyPhosphor();
+  $("phosphor").addEventListener("click", () => {
+    phosphor = PHOSPHORS[(PHOSPHORS.indexOf(phosphor) + 1) % PHOSPHORS.length];
+    applyPhosphor();
+    try {
+      localStorage.setItem("wp.phosphor", phosphor);
+    } catch {
+      /* not worth failing the interaction over */
+    }
+  });
 
   const toggle = $("trace-toggle");
   toggle.checked = showTrace;
