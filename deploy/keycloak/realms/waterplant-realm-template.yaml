@@ -44,6 +44,32 @@ spec:
       realm:
         - name: operator
           description: Plant operator — normal shift duties
+      client:
+        # Tool roles must be explicitly declared here so they appear in the Keycloak
+        # admin UI and can be assigned/removed during lab exercises (Scenarios 3 & 4).
+        # These are referenced by the authz CEL rule:
+        #   ('tool:' + x-mcp-toolname) in resource_access[x-mcp-servername].roles
+        "wp-dev/telemetry-mcp":
+          - name: "tool:get_plant_safety_status"
+          - name: "tool:get_pump_status"
+          - name: "tool:get_all_pump_status"
+          - name: "tool:get_water_quality"
+          - name: "tool:get_reservoir_level"
+          - name: "tool:get_valve_positions"
+        "wp-dev/maintenance-mcp":
+          - name: "tool:search_maintenance_history"
+          - name: "tool:get_maintenance_record"
+          - name: "tool:list_work_orders"
+          - name: "tool:create_work_order"
+          - name: "tool:update_work_order"
+        "wp-dev/control-mcp":
+          - name: "tool:set_pump_speed"
+          - name: "tool:start_pump"
+          - name: "tool:stop_pump"
+          - name: "tool:open_valve"
+          - name: "tool:close_valve"
+          - name: "tool:dump_plant_configuration"
+          - name: "tool:emergency_shutdown"
 
     groups:
       - name: operators
@@ -144,6 +170,24 @@ spec:
               jsonType.label: String
 
     users:
+      # ── Realm admin ──────────────────────────────────────────────────────────
+      # Allows access to the Keycloak admin console for this realm:
+      #   https://<keycloak-host>/admin/waterplant-${PARTICIPANT_NAME}/console
+      # Used by lab facilitators to demonstrate adding/removing tool roles.
+      - username: admin
+        email: admin@waterplant.local
+        firstName: Realm
+        lastName: Admin
+        enabled: true
+        emailVerified: true
+        credentials:
+          - type: password
+            value: redhat
+            temporary: false
+        clientRoles:
+          realm-management:
+            - realm-admin
+
       # ── Operator persona ─────────────────────────────────────────────────────
       # Safe operational tools only.
       # Scenario 3 exercise: add "tool:dump_plant_configuration" to control-mcp roles
