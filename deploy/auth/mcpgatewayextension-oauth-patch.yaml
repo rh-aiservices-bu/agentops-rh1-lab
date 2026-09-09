@@ -1,0 +1,36 @@
+# Patch to add the waterplant lab Keycloak as an authorization server on the
+# MCPGatewayExtension.  The add-participant.sh script appends each
+# participant's realm URL to authorizationServers[].
+#
+# Apply with:
+#   oc patch mcpgatewayextension mcp-extension -n mcp-gateway --type=json \
+#     -p '[{"op":"add","path":"/spec/oauthProtectedResource/authorizationServers/-",
+#           "value":"https://keycloak-wp-dev.apps.caiprod.rhoai.rh-aiservices-bu.com/realms/waterplant-<name>"}]'
+#
+# Reference: full MCPGatewayExtension shape (do not apply directly — this
+# would overwrite the existing extension).
+apiVersion: mcp.kuadrant.io/v1alpha1
+kind: MCPGatewayExtension
+metadata:
+  name: mcp-extension
+  namespace: mcp-gateway
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: mcp-gateway
+    namespace: mcp-gateway
+    sectionName: mcp
+  httpRouteManagement: Enabled
+  oauthProtectedResource:
+    resourceName: "MCP Gateway"
+    resource: "https://mcp.apps.caiprod.rhoai.rh-aiservices-bu.com/mcp"
+    authorizationServers:
+      # Add one entry per participant realm via add-participant.sh:
+      # - https://keycloak-wp-dev.apps.caiprod.rhoai.rh-aiservices-bu.com/realms/waterplant-<name>
+    bearerMethodsSupported:
+      - header
+    scopesSupported:
+      - openid
+      - groups
+      - roles

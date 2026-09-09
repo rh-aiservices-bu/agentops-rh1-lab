@@ -66,7 +66,7 @@ def test_derating_pump_4_brings_vibration_back_inside_limits():
     plant = seed()
     before = plant.pumps[4].vibration_mm_s
 
-    plant.pumps[4].speed_pct = 70.0
+    plant.pumps[4].speed_setpoint_pct = 70.0
     advance(plant, 5)
     after = plant.pumps[4].vibration_mm_s
 
@@ -86,7 +86,7 @@ def test_derating_pump_4_clears_the_acute_risk_without_hiding_the_fault():
     plant = seed()
     assert safety.evaluate(plant).status == "critical"
 
-    plant.pumps[4].speed_pct = 70.0
+    plant.pumps[4].speed_setpoint_pct = 70.0
     advance(plant, 120)
 
     report = safety.evaluate(plant)
@@ -103,7 +103,7 @@ def test_head_deficit_is_speed_relative():
     """A healthy pump reads healthy at any speed."""
     plant = seed()
     for speed in (100.0, 70.0, 50.0):
-        plant.pumps[1].speed_pct = speed
+        plant.pumps[1].speed_setpoint_pct = speed
         advance(plant, 3)
         check = next(
             c
@@ -116,7 +116,7 @@ def test_head_deficit_is_speed_relative():
 def test_derating_pump_4_does_not_stop_the_plant():
     """Hardening must not come at the cost of function — nor must derating."""
     plant = seed()
-    plant.pumps[4].speed_pct = 70.0
+    plant.pumps[4].speed_setpoint_pct = 70.0
     advance(plant, 60)
 
     assert plant.pumps[4].running
@@ -131,7 +131,7 @@ def test_derating_pump_4_does_not_stop_the_plant():
 def test_running_a_pump_below_minimum_flow_overheats_it():
     """Scenario 6 needs this to be genuinely destructive, not merely odd."""
     plant = seed()
-    plant.pumps[2].speed_pct = 5.0
+    plant.pumps[2].speed_setpoint_pct = 5.0
     advance(plant, 120)
 
     p2 = plant.pumps[2]
@@ -141,6 +141,51 @@ def test_running_a_pump_below_minimum_flow_overheats_it():
 
     report = safety.evaluate(plant)
     assert report.status in {"warn", "critical"}
+
+
+def test_stopping_a_pump_zeroes_its_speed_but_keeps_the_setpoint():
+    """A stopped pump turns at zero, whatever it was last commanded to do.
+
+    These were one field, so a stopped pump reported the speed it used to run
+    at — wrong on the dashboard, and worse in the telemetry the agent reasons
+    over, since `get_pump_status` returned `running: false, speed_pct: 85`.
+    """
+    plant = seed()
+    assert plant.pumps[1].speed_pct == 85.0
+
+    plant.pumps[1].running = False
+    advance(plant, 2)
+
+    assert plant.pumps[1].speed_pct == 0.0, "a stopped pump turns at zero"
+    assert plant.pumps[1].speed_setpoint_pct == 85.0, "the reference is retained"
+    assert plant.pumps[1].discharge_bar == 0.0
+    assert plant.pumps[1].vibration_mm_s == 0.0
+
+
+def test_a_restarted_pump_resumes_its_previous_setpoint():
+    """Which is why the setpoint is retained rather than zeroed on stop."""
+    plant = seed()
+    plant.pumps[4].speed_setpoint_pct = 70.0
+    advance(plant, 2)
+    plant.pumps[4].running = False
+    advance(plant, 2)
+    assert plant.pumps[4].speed_pct == 0.0
+
+    plant.pumps[4].running = True
+    advance(plant, 2)
+    assert plant.pumps[4].speed_pct == 70.0
+
+
+def test_a_stopped_pump_contributes_no_flow():
+    plant = seed()
+    # Flows are computed on tick, so the seed reports zero until it runs once.
+    advance(plant, 2)
+    before = plant.reservoir.outflow_pct_s
+    assert before > 0
+
+    plant.pumps[1].running = False
+    advance(plant, 2)
+    assert plant.reservoir.outflow_pct_s < before
 
 
 def test_low_speed_collapses_delivered_flow():

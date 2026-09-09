@@ -179,6 +179,7 @@ body {
 
 .plate-hd {
   text-align: center; padding: 10px 40px 8px;
+  min-height: 38px;
   font-size: .95rem; font-weight: 600; letter-spacing: .26em;
   color: var(--label);
   border-bottom: 1px solid rgba(0,0,0,.5);
@@ -314,10 +315,9 @@ body {
  * vignette and a slow flicker — all switched off under prefers-reduced-motion,
  * where the flicker in particular is not a nice thing to force on anyone.
  */
-.chat-plate { display: flex; flex-direction: column; min-height: 320px; }
+.chat-plate { display: flex; flex-direction: column; }
 
 .persona {
-  position: absolute; right: 60px; top: 50%; transform: translateY(-50%);
   font-family: var(--crt); font-size: .95rem; letter-spacing: .06em;
   text-transform: uppercase;
   background: var(--crt-bg); color: var(--phos);
@@ -327,7 +327,11 @@ body {
 
 /* The screen itself, recessed behind a bezel. */
 .crt {
-  position: relative; flex: 1; margin: 16px 20px; border-radius: 10px;
+  /* A definite height, not flex:1 against a content-sized parent. Without it
+     the panel grows with the transcript, .chat never overflows, and the page
+     scrolls instead of the screen — so there is no scrollbar to style. */
+  height: clamp(280px, 44vh, 560px);
+  position: relative; margin: 16px 20px; border-radius: 10px;
   background: radial-gradient(120% 130% at 50% 40%, #241505 0%, var(--crt-bg) 60%, #0b0602 100%);
   border: 1px solid #000;
   box-shadow:
@@ -342,21 +346,21 @@ body {
 
 /* Scanlines + a faint horizontal roll. */
 .crt::before {
-  content: ""; position: absolute; inset: 0; z-index: 2; pointer-events: none;
+  content: ""; position: absolute; inset: 0 11px 0 0; z-index: 2; pointer-events: none;
   background: repeating-linear-gradient(
     0deg, rgba(0,0,0,.30) 0px, rgba(0,0,0,.30) 1px, transparent 1px, transparent 3px);
   mix-blend-mode: multiply;
 }
 /* Vignette + glass sheen. */
 .crt::after {
-  content: ""; position: absolute; inset: 0; z-index: 3; pointer-events: none;
+  content: ""; position: absolute; inset: 0 11px 0 0; z-index: 3; pointer-events: none;
   background:
     radial-gradient(120% 90% at 50% 45%, transparent 40%, rgba(0,0,0,.55) 100%),
     linear-gradient(115deg, rgba(255,255,255,.05) 0%, transparent 42%);
 }
 
 .chat {
-  position: relative; z-index: 1; height: 100%; overflow-y: auto;
+  position: relative; z-index: 1; height: 100%; overflow-y: scroll;
   padding: 16px 20px 20px;
   font-family: var(--crt); font-size: 1.22rem; line-height: 1.42;
   color: var(--phos); letter-spacing: .02em;
@@ -431,4 +435,76 @@ body {
   * { transition: none !important; }
   .chat, .cursor { animation: none !important; }
   .cursor { opacity: 1; }
+}
+
+/* Live tool trace on the CRT. Dimmer than the prose so the agent's answer
+   still reads as the primary content, but present enough that a participant
+   can follow what it is doing. */
+.line.trace { font-size: 1.06rem; letter-spacing: .01em; margin-bottom: 3px; }
+.line.trace.dim  { color: var(--phos-dim); }
+.line.trace.call { color: var(--phos); text-shadow: 0 0 6px rgba(255,182,60,.5); }
+.line.trace.ok   { color: var(--phos-dim); padding-left: 1.4em; }
+.line.trace.err  { color: #ff8b4a; padding-left: 1.4em; text-shadow: 0 0 8px rgba(255,107,42,.45); }
+
+/* MCP trace switch, sitting in the assistant panel header. */
+/* Both header controls live in one flex row, anchored to the right of the
+   panel header. Positioning them absolutely at fixed offsets made them overlap
+   as soon as the persona names rendered wider than the guessed gap. */
+.hd-controls {
+  position: absolute; right: 22px; top: 50%; transform: translateY(-50%);
+  display: flex; align-items: center; gap: 16px;
+}
+.trace-switch {
+  display: flex; align-items: center; gap: 7px; cursor: pointer;
+  white-space: nowrap;
+  font-size: .62rem; letter-spacing: .16em; color: var(--label-dim);
+}
+.trace-switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+.trace-switch .sw {
+  width: 34px; height: 16px; border-radius: 8px; position: relative;
+  background: linear-gradient(180deg, #0b1214, #16232a);
+  border: 1px solid rgba(0,0,0,.7);
+  box-shadow: inset 0 2px 5px rgba(0,0,0,.85);
+}
+.trace-switch .knob {
+  position: absolute; top: 1px; left: 1px; width: 12px; height: 12px;
+  border-radius: 50%; transition: left .18s ease, background .18s ease;
+  background: radial-gradient(circle at 35% 30%, #6d7a80, #2b3639);
+}
+.trace-switch input:checked + .sw .knob {
+  left: 19px;
+  background: radial-gradient(circle at 35% 30%, #ffe1a8, var(--phos) 55%, #9a6408);
+  box-shadow: 0 0 8px rgba(255,182,60,.75);
+}
+.trace-switch input:checked ~ .lbl { color: var(--phos); }
+.trace-switch input:focus-visible + .sw { outline: 2px solid var(--phos); outline-offset: 2px; }
+@media (max-width: 860px) {
+  .trace-switch .lbl { display: none; }
+}
+@media (max-width: 680px) {
+  .hd-controls { position: static; transform: none; justify-content: center; margin-top: 8px; }
+}
+
+/* Scrollbar, built into the CRT rather than left as chrome default.
+   The scanline and vignette overlays sit above the scroll area, so the thumb
+   is given enough glow to read through them. */
+.chat {
+  scrollbar-width: thin;
+  scrollbar-color: var(--phos-dim) rgba(0, 0, 0, .55);
+  overscroll-behavior: contain;
+}
+.chat::-webkit-scrollbar { width: 11px; }
+.chat::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, .55);
+  border-left: 1px solid rgba(255, 182, 60, .14);
+}
+.chat::-webkit-scrollbar-thumb {
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background: linear-gradient(180deg, var(--phos), var(--phos-dim)) padding-box;
+  box-shadow: 0 0 8px rgba(255, 182, 60, .45);
+}
+.chat::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, var(--phos-hot), var(--phos)) padding-box;
+  box-shadow: 0 0 12px rgba(255, 182, 60, .7);
 }

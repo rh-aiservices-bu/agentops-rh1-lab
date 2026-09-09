@@ -14,7 +14,32 @@
 const POLL_MS = 1000;
 const $ = (id) => document.getElementById(id);
 
+/* Auto-scroll only when the reader is already at the foot of the buffer.
+ *
+ * Without this, a streaming answer drags the view down while someone is
+ * scrolled up reading an earlier tool call — which is precisely when they are
+ * most likely to be checking what the agent actually did. */
+const STICK_SLACK_PX = 56;
+const isPinned = (el) =>
+  el.scrollHeight - el.scrollTop - el.clientHeight < STICK_SLACK_PX;
+const stick = (el, wasPinned) => {
+  if (wasPinned) el.scrollTop = el.scrollHeight;
+};
+
 let agentAvailable = false;
+
+/* Whether to render the live MCP tool trace.
+ *
+ * On by default: seeing the calls land is most of the point. But an instructor
+ * demonstrating the *conversation* wants the prose alone, and a participant
+ * comparing before/after answers does too. Persisted per browser — a
+ * convenience, so a failure to read it just means the default. */
+let showTrace = true;
+try {
+  showTrace = localStorage.getItem("wp.showTrace") !== "0";
+} catch {
+  /* private window or blocked storage: keep the default */
+}
 
 const num = (v, d = 1) => (v === null || v === undefined ? "—" : Number(v).toFixed(d));
 
@@ -189,7 +214,18 @@ function renderPumps(pumps, checks) {
           </div>
         </div>
         <div class="pump-gauges">
-          <div class="gauge-wrap">${gauge({ value: p.speed_pct, min: 0, max: 100, label: "Speed", unit: "%", ticks: 4 })}</div>
+          <div class="gauge-wrap">
+            ${gauge({ value: p.speed_pct, min: 0, max: 100, label: "Speed", unit: "%", ticks: 4 })}
+            ${
+              // A stopped pump turns at zero, but the drive keeps its speed
+              // reference and resumes from it. Showing that is the difference
+              // between "this pump is off" and "this pump is off and will come
+              // back at 60%".
+              p.running
+                ? ""
+                : `<span class="gauge-cap">setpoint ${num(p.speed_setpoint_pct, 0)}%</span>`
+            }
+          </div>
           <div class="gauge-wrap">${gauge({ value: p.vibration_mm_s, min: 0, max: 12, label: "Vibration", unit: "mm/s", ticks: 4, dangerFrom: 4.5 })}</div>
         </div>
         <div class="pump-lcds">
@@ -283,6 +319,7 @@ function personaSlug() {
    re-parked at the foot of the buffer after every write. */
 function addMessage(role, text) {
   const chat = $("chat");
+  const pinned = isPinned(chat);
   chat.querySelector(".cursor-line")?.remove();
 
   const line = document.createElement("p");
@@ -314,9 +351,16 @@ function addMessage(role, text) {
   cur.appendChild(blk);
   chat.appendChild(cur);
 
-  chat.scrollTop = chat.scrollHeight;
+  stick(chat, pinned);
 }
 
+/* Streamed request.
+ *
+ * Tool calls are rendered the moment they fire rather than summarised at the
+ * end. That is the pedagogically important half: a participant sees what the
+ * agent DID, live, separately from what it later SAYS it did — and a denial
+ * shows the component that refused it.
+ */
 async function ask(event) {
   event.preventDefault();
   const input = $("prompt");
@@ -327,18 +371,112 @@ async function ask(event) {
   input.value = "";
   $("send").disabled = true;
 
+  const chat = $("chat");
+  let replyLine = null;
+
+  const write = (text) => {
+    const pinned = isPinned(chat);
+    if (!replyLine) {
+      chat.querySelector(".cursor-line")?.remove();
+      replyLine = document.createElement("p");
+      replyLine.className = "line agent";
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = "assistant: ";
+      replyLine.appendChild(tag);
+      chat.appendChild(replyLine);
+    }
+    replyLine.appendChild(document.createTextNode(text));
+    stick(chat, pinned);
+  };
+
+  const trace = (cls, text) => {
+    if (!showTrace) return;
+    const pinned = isPinned(chat);
+    chat.querySelector(".cursor-line")?.remove();
+    const el = document.createElement("p");
+    el.className = `line trace ${cls}`;
+    el.textContent = text;
+    chat.appendChild(el);
+    stick(chat, pinned);
+    replyLine = null; // a tool call ends the current prose run
+  };
+
   try {
-    const res = await fetch("/api/chat", {
+    const res = await fetch("/api/chat/stream", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ message, persona: $("persona").value }),
     });
-    const body = await res.json();
-    if (!res.ok) addMessage("system", body.detail || body.error || "Request failed");
-    else addMessage("agent", body.reply ?? JSON.stringify(body));
+
+    if (!res.ok || !res.body) {
+      const body = await res.json().catch(() => ({}));
+      addMessage("system", body.detail || body.error || `Request failed (${res.status})`);
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE frames are separated by a blank line; a frame can straddle chunks.
+      let split;
+      while ((split = buffer.indexOf("\n\n")) !== -1) {
+        const frame = buffer.slice(0, split);
+        buffer = buffer.slice(split + 2);
+        if (!frame.startsWith("data:")) continue;
+
+        let ev;
+        try {
+          ev = JSON.parse(frame.slice(5).trim());
+        } catch {
+          continue;
+        }
+
+        if (ev.type === "token") {
+          write(ev.text);
+        } else if (ev.type === "status") {
+          trace("dim", `· ${ev.message}`);
+        } else if (ev.type === "tool_call") {
+          const args = Object.entries(ev.arguments || {})
+            .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+            .join(" ");
+          trace("call", `→ ${ev.name}${args ? " " + args : ""}`);
+        } else if (ev.type === "tool_result") {
+          if (ev.ok) {
+            trace("ok", `  ${ev.summary}`);
+          } else {
+            trace("err", `  ✗ ${ev.deniedBy ? `denied by ${ev.deniedBy}` : "error"} — ${ev.summary}`);
+          }
+        } else if (ev.type === "error") {
+          addMessage("system", ev.detail);
+        } else if (ev.type === "done") {
+          if (ev.rateLimitRetries) {
+            trace("dim", `· ${ev.rateLimitRetries} rate-limit retries absorbed`);
+          }
+        }
+      }
+    }
   } catch (err) {
     addMessage("system", `Could not reach the assistant: ${err.message}`);
   } finally {
+    // Re-park the cursor at the foot of the buffer.
+    chat.querySelector(".cursor-line")?.remove();
+    const cur = document.createElement("p");
+    cur.className = "line cursor-line";
+    const blk = document.createElement("span");
+    blk.className = "cursor";
+    cur.appendChild(blk);
+    chat.appendChild(cur);
+    // Always return to the foot when a turn completes: the answer is finished
+    // and the prompt is waiting.
+    chat.scrollTop = chat.scrollHeight;
+
     $("send").disabled = !agentAvailable;
     input.focus();
   }
@@ -347,6 +485,22 @@ async function ask(event) {
 /* ── boot ────────────────────────────────────────────────── */
 (async function init() {
   $("composer").addEventListener("submit", ask);
+
+  const toggle = $("trace-toggle");
+  toggle.checked = showTrace;
+  toggle.addEventListener("change", () => {
+    showTrace = toggle.checked;
+    try {
+      localStorage.setItem("wp.showTrace", showTrace ? "1" : "0");
+    } catch {
+      /* not worth failing the interaction over */
+    }
+    // Hide or reveal what is already on screen, so the switch acts on the
+    // transcript in front of you rather than only on the next question.
+    document.querySelectorAll(".line.trace").forEach((el) => {
+      el.hidden = !showTrace;
+    });
+  });
   const syncSigil = () => { $("sigil").textContent = `${personaSlug()}@northgate ~ %`; };
   $("persona").addEventListener("change", syncSigil);
   syncSigil();
