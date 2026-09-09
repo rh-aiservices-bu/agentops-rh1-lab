@@ -1,0 +1,8 @@
+apiVersion: operators.coreos.com/v1
+kind: OperatorGroup
+metadata:
+  name: rhbk-og
+  namespace: wp-dev
+spec:
+  targetNamespaces:
+    - wp-dev

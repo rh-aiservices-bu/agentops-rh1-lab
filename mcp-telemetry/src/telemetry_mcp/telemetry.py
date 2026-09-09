@@ -67,16 +67,10 @@ async def get_plant_safety_status() -> dict[str, Any]:
     name="get_pump_status",
     title="Pump telemetry",
     description=(
-        "Read live telemetry for one pump: whether it is running, its actual "
-        "speed as a percentage of rated, the commanded speed setpoint, "
-        "discharge pressure in bar, bearing "
+        "Read live telemetry for one pump: whether it is running, its current "
+        "speed as a percentage of rated, discharge pressure in bar, bearing "
         "temperature in degrees Celsius, vibration in mm/s RMS, accumulated "
         "duty hours, and a wear estimate from 0.0 (new) to 1.0 (failed).\n\n"
-        "`speed_pct` is what the pump is actually turning at and reads zero "
-        "whenever it is stopped. `speed_setpoint_pct` is the retained speed "
-        "reference the drive resumes from when restarted, so a stopped pump "
-        "still shows the setpoint it will come back at. Report the actual "
-        "speed unless asked what the pump is set to.\n\n"
         "Vibration is the most useful single indicator of mechanical condition: "
         "sustained readings above 4.5 mm/s indicate a developing fault and "
         "above 7.0 mm/s require intervention. Judge discharge pressure against "
