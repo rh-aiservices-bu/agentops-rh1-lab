@@ -1,0 +1,213 @@
+# Per-participant Keycloak realm for the Water Plant AgentOps lab.
+#
+# Usage (via add-participant.sh — do not apply directly):
+#   sed "s/\${PARTICIPANT_NAME}/alice/g" waterplant-realm-template.yaml | oc apply -f -
+#
+# Realm name:    waterplant-${PARTICIPANT_NAME}
+# Clients:
+#   mcp-gateway              — public PKCE client used by the MCP Inspector / agent
+#   wp-dev/telemetry-mcp    — bearer-only resource server (read-only plant telemetry)
+#   wp-dev/maintenance-mcp  — bearer-only resource server (work orders, history)
+#   wp-dev/control-mcp      — bearer-only resource server (pump/valve control)
+#
+# Personas (users):
+#   operator / operator  — can call all safe operational tools
+#                          intentionally LACKS dump_plant_configuration (Scenario 3)
+#                          and emergency_shutdown (Scenario 4) — lab exercises add/remove these
+#
+# Client ID format "wp-dev/<service-name>" must match the x-mcp-servername header
+# that the MCP Gateway broker injects.  Adjust if your MCPServerRegistrations use
+# a different naming convention.
+apiVersion: k8s.keycloak.org/v2alpha1
+kind: KeycloakRealmImport
+metadata:
+  name: waterplant-${PARTICIPANT_NAME}
+  namespace: wp-dev
+spec:
+  keycloakCRName: keycloak
+  realm:
+    realm: waterplant-${PARTICIPANT_NAME}
+    id: waterplant-${PARTICIPANT_NAME}
+    enabled: true
+    displayName: "Water Plant — ${PARTICIPANT_NAME}"
+    sslRequired: none
+    registrationAllowed: false
+    loginWithEmailAllowed: true
+    duplicateEmailsAllowed: false
+    resetPasswordAllowed: false
+    editUsernameAllowed: false
+    bruteForceProtected: true
+    accessTokenLifespan: 1800
+    ssoSessionMaxLifespan: 1800
+
+    roles:
+      realm:
+        - name: operator
+          description: Plant operator — normal shift duties
+
+    groups:
+      - name: operators
+        subGroups: []
+    defaultGroups:
+      - operators
+
+    clients:
+      # ── Public PKCE client used by MCP Inspector and the agent ──────────────
+      - clientId: mcp-gateway
+        name: MCP Gateway Client
+        enabled: true
+        publicClient: true
+        directAccessGrantsEnabled: true
+        standardFlowEnabled: true
+        implicitFlowEnabled: false
+        redirectUris:
+          - "http://localhost:*"
+          - "http://127.0.0.1:*"
+          - "https://localhost:*"
+        webOrigins:
+          - "*"
+        protocol: openid-connect
+        attributes:
+          pkce.code.challenge.method: S256
+          client.secret.creation.time: "0"
+        defaultClientScopes:
+          - openid
+          - roles
+          - groups
+
+      # ── Telemetry MCP server (read-only plant data) ─────────────────────────
+      - clientId: wp-dev/telemetry-mcp
+        name: Telemetry MCP Server
+        enabled: true
+        bearerOnly: true
+        publicClient: false
+        serviceAccountsEnabled: false
+        protocol: openid-connect
+        defaultClientScopes:
+          - openid
+
+      # ── Maintenance MCP server (work orders, history) ───────────────────────
+      - clientId: wp-dev/maintenance-mcp
+        name: Maintenance MCP Server
+        enabled: true
+        bearerOnly: true
+        publicClient: false
+        serviceAccountsEnabled: false
+        protocol: openid-connect
+        defaultClientScopes:
+          - openid
+
+      # ── Control MCP server (pump/valve actuation) ────────────────────────────
+      - clientId: wp-dev/control-mcp
+        name: Control MCP Server
+        enabled: true
+        bearerOnly: true
+        publicClient: false
+        serviceAccountsEnabled: false
+        protocol: openid-connect
+        defaultClientScopes:
+          - openid
+
+    clientScopes:
+      - name: groups
+        protocol: openid-connect
+        attributes:
+          include.in.token.scope: "true"
+        protocolMappers:
+          - name: groups
+            protocol: openid-connect
+            protocolMapper: oidc-group-membership-mapper
+            consentRequired: false
+            config:
+              full.path: "false"
+              introspection.token.claim: "true"
+              userinfo.token.claim: "true"
+              id.token.claim: "true"
+              access.token.claim: "true"
+              claim.name: groups
+
+      - name: roles
+        protocol: openid-connect
+        attributes:
+          include.in.token.scope: "true"
+        protocolMappers:
+          - name: resource_access
+            protocol: openid-connect
+            protocolMapper: oidc-usermodel-client-role-mapper
+            consentRequired: false
+            config:
+              multivalued: "true"
+              userinfo.token.claim: "true"
+              id.token.claim: "true"
+              access.token.claim: "true"
+              claim.name: "resource_access.${client_id}.roles"
+              jsonType.label: String
+
+    users:
+      # ── Operator persona ─────────────────────────────────────────────────────
+      # Safe operational tools only.
+      # Scenario 3 exercise: add "tool:dump_plant_configuration" to control-mcp roles
+      # Scenario 4 exercise: add "tool:emergency_shutdown" to control-mcp roles
+      - username: operator
+        email: operator@waterplant.local
+        firstName: Plant
+        lastName: Operator
+        enabled: true
+        emailVerified: true
+        credentials:
+          - type: password
+            value: operator
+            temporary: false
+        realmRoles:
+          - operator
+        groups:
+          - operators
+        clientRoles:
+          wp-dev/telemetry-mcp:
+            - "tool:get_plant_safety_status"
+            - "tool:get_pump_status"
+            - "tool:get_all_pump_status"
+            - "tool:get_water_quality"
+            - "tool:get_reservoir_level"
+            - "tool:get_valve_positions"
+          wp-dev/maintenance-mcp:
+            - "tool:search_maintenance_history"
+            - "tool:get_maintenance_record"
+            - "tool:list_work_orders"
+            - "tool:create_work_order"
+            - "tool:update_work_order"
+          wp-dev/control-mcp:
+            - "tool:set_pump_speed"
+            - "tool:start_pump"
+            - "tool:stop_pump"
+            - "tool:open_valve"
+            - "tool:close_valve"
+            # "tool:dump_plant_configuration" — withheld (Scenario 3)
+            # "tool:emergency_shutdown"       — withheld (Scenario 4)
+
+    clientScopeMappings:
+      wp-dev/telemetry-mcp:
+        - client: mcp-gateway
+          roles:
+            - "tool:get_plant_safety_status"
+            - "tool:get_pump_status"
+            - "tool:get_all_pump_status"
+            - "tool:get_water_quality"
+            - "tool:get_reservoir_level"
+            - "tool:get_valve_positions"
+      wp-dev/maintenance-mcp:
+        - client: mcp-gateway
+          roles:
+            - "tool:search_maintenance_history"
+            - "tool:get_maintenance_record"
+            - "tool:list_work_orders"
+            - "tool:create_work_order"
+            - "tool:update_work_order"
+      wp-dev/control-mcp:
+        - client: mcp-gateway
+          roles:
+            - "tool:set_pump_speed"
+            - "tool:start_pump"
+            - "tool:stop_pump"
+            - "tool:open_valve"
+            - "tool:close_valve"

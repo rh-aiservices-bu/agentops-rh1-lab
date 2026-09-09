@@ -1,0 +1,172 @@
+apiVersion: k8s.keycloak.org/v2alpha1
+kind: KeycloakRealmImport
+metadata:
+  name: mcp
+  namespace: wp-dev
+spec:
+  keycloakCRName: keycloak
+  realm:
+    realm: mcp
+    id: mcp
+    enabled: true
+    sslRequired: none
+    registrationAllowed: false
+    loginWithEmailAllowed: true
+    duplicateEmailsAllowed: false
+    resetPasswordAllowed: false
+    editUsernameAllowed: false
+    bruteForceProtected: true
+    accessTokenLifespan: 1800
+    ssoSessionMaxLifespan: 1800
+    roles:
+      realm:
+        - name: mcp-user
+          description: Basic MCP user role
+    groups:
+      - name: accounting
+        subGroups: []
+      - name: engineering
+        subGroups: []
+      - name: mcp-users
+        subGroups: []
+    defaultGroups:
+      - mcp-users
+    clients:
+      - clientId: mcp-gateway
+        name: MCP Gateway Client
+        enabled: true
+        publicClient: true
+        directAccessGrantsEnabled: true
+        standardFlowEnabled: true
+        implicitFlowEnabled: false
+        redirectUris:
+          - "http://localhost:*"
+          - "http://127.0.0.1:*"
+          - "https://localhost:*"
+        webOrigins:
+          - "*"
+        protocol: openid-connect
+        attributes:
+          pkce.code.challenge.method: S256
+          client.secret.creation.time: "0"
+        defaultClientScopes:
+          - openid
+          - roles
+          - groups
+      - clientId: mcp-test/test-server1
+        name: Test Server 1 Resource
+        enabled: true
+        bearerOnly: true
+        publicClient: false
+        serviceAccountsEnabled: false
+        protocol: openid-connect
+        defaultClientScopes:
+          - openid
+      - clientId: mcp-test/risk-server
+        name: Risk Server Resource
+        enabled: true
+        bearerOnly: true
+        publicClient: false
+        serviceAccountsEnabled: false
+        protocol: openid-connect
+        defaultClientScopes:
+          - openid
+    clientScopes:
+      - name: groups
+        protocol: openid-connect
+        attributes:
+          include.in.token.scope: "true"
+        protocolMappers:
+          - name: groups
+            protocol: openid-connect
+            protocolMapper: oidc-group-membership-mapper
+            consentRequired: false
+            config:
+              full.path: "false"
+              introspection.token.claim: "true"
+              userinfo.token.claim: "true"
+              id.token.claim: "true"
+              access.token.claim: "true"
+              claim.name: groups
+      - name: roles
+        protocol: openid-connect
+        attributes:
+          include.in.token.scope: "true"
+        protocolMappers:
+          - name: resource_access
+            protocol: openid-connect
+            protocolMapper: oidc-usermodel-client-role-mapper
+            consentRequired: false
+            config:
+              multivalued: "true"
+              userinfo.token.claim: "true"
+              id.token.claim: "true"
+              access.token.claim: "true"
+              claim.name: "resource_access.${client_id}.roles"
+              jsonType.label: String
+    users:
+      - username: mcp
+        email: mcp@test.com
+        firstName: mcp
+        lastName: user
+        enabled: true
+        emailVerified: true
+        credentials:
+          - type: password
+            value: mcp
+            temporary: false
+        realmRoles:
+          - mcp-user
+        groups:
+          - accounting
+          - engineering
+          - mcp-users
+        clientRoles:
+          mcp-test/test-server1:
+            - "tool:greet"
+            - "tool:headers"
+            - "tool:time"
+            - "tool:slow"
+            - "tool:add_tool"
+          mcp-test/risk-server:
+            - "tool:calculate_dti"
+            - "tool:calculate_ltv"
+            - "tool:evaluate_credit_risk"
+            - "tool:assess_income_stability"
+            - "tool:assess_asset_sufficiency"
+            - "tool:generate_risk_recommendation"
+      - username: restricted
+        email: restricted@test.com
+        firstName: restricted
+        lastName: user
+        enabled: true
+        emailVerified: true
+        credentials:
+          - type: password
+            value: restricted
+            temporary: false
+        realmRoles:
+          - mcp-user
+        groups:
+          - mcp-users
+        clientRoles:
+          mcp-test/test-server1:
+            - "tool:greet"
+    clientScopeMappings:
+      mcp-test/test-server1:
+        - client: mcp-gateway
+          roles:
+            - "tool:greet"
+            - "tool:headers"
+            - "tool:time"
+            - "tool:slow"
+            - "tool:add_tool"
+      mcp-test/risk-server:
+        - client: mcp-gateway
+          roles:
+            - "tool:calculate_dti"
+            - "tool:calculate_ltv"
+            - "tool:evaluate_credit_risk"
+            - "tool:assess_income_stability"
+            - "tool:assess_asset_sufficiency"
+            - "tool:generate_risk_recommendation"
