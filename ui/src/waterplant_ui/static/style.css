@@ -543,6 +543,70 @@ body {
 }
 :root[data-phosphor="off"] .crt::before,
 :root[data-phosphor="off"] .crt::after { display: none; }
+
+/* ── readable mode ───────────────────────────────────────
+ * This state exists for people who find the vintage treatment hard to read,
+ * so it has to do more than drop the scanlines. VT323 is a pixel face with
+ * thin strokes and ambiguous glyphs; the panel labels are condensed, uppercase
+ * and widely tracked. Every one of those is a legibility cost paid for
+ * atmosphere.
+ *
+ * So this swaps to standard system faces throughout, restores normal case and
+ * tracking, and sets a comfortable size and line height. A monospace is kept
+ * for the transcript because the tool trace is column-aligned, and system
+ * monospace is legible in a way VT323 is not.
+ */
+:root[data-phosphor="off"] {
+  --display: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+             Helvetica, Arial, sans-serif;
+  --lcd: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+         "Liberation Mono", monospace;
+  --crt: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+         "Liberation Mono", monospace;
+  --label: #dde5e4;
+  --label-dim: #a9b6b5;
+  --lcd-ink: #eef3f2;
+}
+
+/* Normal case and tracking. Uppercase with wide letter-spacing is markedly
+   harder to read, and it is used on every label in the panel. */
+:root[data-phosphor="off"] .engraved,
+:root[data-phosphor="off"] .plate-hd,
+:root[data-phosphor="off"] .eyebrow,
+:root[data-phosphor="off"] .mast .site,
+:root[data-phosphor="off"] .rd .k,
+:root[data-phosphor="off"] .q .k,
+:root[data-phosphor="off"] .sz .k,
+:root[data-phosphor="off"] .gauge-cap,
+:root[data-phosphor="off"] .chip,
+:root[data-phosphor="off"] .status-box .k,
+:root[data-phosphor="off"] .status-box .v,
+:root[data-phosphor="off"] .pump-lcds .k,
+:root[data-phosphor="off"] .valve .nm,
+:root[data-phosphor="off"] .check .sub,
+:root[data-phosphor="off"] .foot,
+:root[data-phosphor="off"] .composer button,
+:root[data-phosphor="off"] .trace-switch,
+:root[data-phosphor="off"] .phosphor-btn {
+  text-transform: none;
+  letter-spacing: .01em;
+  text-shadow: none;
+}
+:root[data-phosphor="off"] .plate-hd { letter-spacing: .04em; font-weight: 600; }
+:root[data-phosphor="off"] body { letter-spacing: normal; }
+
+/* A comfortable reading size. VT323 renders small for its point size, so the
+   transcript was set large to compensate; a real monospace at that size is
+   overbearing. */
+:root[data-phosphor="off"] .chat {
+  font-size: .95rem;
+  line-height: 1.65;
+  letter-spacing: normal;
+}
+:root[data-phosphor="off"] .line.trace { font-size: .9rem; }
+:root[data-phosphor="off"] .composer input,
+:root[data-phosphor="off"] .composer .sigil { font-size: .95rem; }
+:root[data-phosphor="off"] .persona { font-size: .78rem; text-transform: none; }
 :root[data-phosphor="off"] .crt {
   background: linear-gradient(180deg, #101c20, #080f11);
   box-shadow:

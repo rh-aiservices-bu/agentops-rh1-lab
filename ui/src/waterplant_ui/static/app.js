@@ -41,11 +41,13 @@ try {
   /* private window or blocked storage: keep the default */
 }
 
-/* Terminal phosphor. "off" is not a third colour — it disables the CRT
- * simulation entirely, for projecting to a room or reading for a long
- * stretch. Persisted per browser, best-effort. */
+/* Terminal phosphor. "off" is not a third colour — it is the accessibility
+ * setting: standard system faces, normal case and tracking, comfortable size,
+ * and no CRT simulation at all. For anyone who finds the vintage treatment
+ * hard to read, or who is projecting it to a room. Persisted per browser,
+ * best-effort. */
 const PHOSPHORS = ["amber", "green", "off"];
-const PHOSPHOR_LABEL = { amber: "Amber", green: "Green", off: "Effects off" };
+const PHOSPHOR_LABEL = { amber: "Amber", green: "Green", off: "Readable" };
 let phosphor = "amber";
 try {
   const saved = localStorage.getItem("wp.phosphor");
