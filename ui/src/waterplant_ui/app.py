@@ -23,6 +23,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import harness
+
 PLANT_API_URL = os.environ.get("PLANT_API_URL", "http://plant-api:8080")
 # Empty until the agent is deployed — the chat pane degrades to a clear
 # "not yet available" state rather than failing opaquely.
@@ -57,6 +59,13 @@ async def config() -> dict[str, Any]:
         "agentAvailable": bool(AGENT_URL),
         "mlflowUrl": MLFLOW_URL,
         "namespace": os.environ.get("NAMESPACE", ""),
+        # Which harness is behind the chat pane, and what it costs. Both are
+        # reported rather than hidden: a participant told to inspect a trace or
+        # to switch persona should be able to see when the deployed harness
+        # cannot honour that, instead of concluding the exercise is broken.
+        "agentHarness": harness.PROTOCOL,
+        "agentTraceAvailable": harness.PROTOCOL == "waterplant",
+        "identityPropagated": harness.identity_is_propagated(),
     }
 
 
@@ -109,16 +118,11 @@ async def chat(req: ChatRequest, request: Request) -> JSONResponse:
             status_code=503,
         )
 
-    headers = {}
-    if auth := request.headers.get("authorization"):
-        headers["authorization"] = auth
+    target, payload = harness.request(AGENT_URL, req.message, req.persona, stream=False)
+    headers = harness.headers_for(request.headers.get("authorization"))
 
     try:
-        response = await client().post(
-            f"{AGENT_URL}/chat",
-            json={"message": req.message, "persona": req.persona},
-            headers=headers,
-        )
+        response = await client().post(target, json=payload, headers=headers)
     except httpx.HTTPError as exc:
         return JSONResponse({"error": f"agent unreachable: {exc}"}, status_code=502)
 
@@ -126,7 +130,7 @@ async def chat(req: ChatRequest, request: Request) -> JSONResponse:
     # plain text). Parsing it blindly turned an agent fault into a UI fault and
     # hid the real error.
     try:
-        body = response.json()
+        body = harness.translate_reply(response.json())
     except ValueError:
         body = {
             "error": "agent_error",
@@ -147,9 +151,11 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 async def chat_stream(req: ChatRequest, request: Request):
     """Proxy the agent's SSE stream to the browser, unbuffered.
 
-    Forwards the caller's Authorization header exactly as /api/chat does. The
-    BFF adds nothing and decides nothing; it exists so the browser talks to one
-    origin.
+    On the native path this relays raw and adds nothing — the BFF decides
+    nothing; it exists so the browser talks to one origin. On a foreign harness
+    `waterplant_ui.harness` translates into the same event shape, so the console
+    itself is identical either way. What differs is what the harness can supply:
+    see that module for what an OpenAI-compatible server cannot.
     """
     if not AGENT_URL:
         return JSONResponse(
@@ -160,25 +166,14 @@ async def chat_stream(req: ChatRequest, request: Request):
             status_code=503,
         )
 
-    headers = {"accept": "text/event-stream"}
-    if auth := request.headers.get("authorization"):
-        headers["authorization"] = auth
-
-    async def relay():
-        try:
-            async with client().stream(
-                "POST",
-                f"{AGENT_URL}/chat/stream",
-                json={"message": req.message, "persona": req.persona},
-                headers=headers,
-            ) as upstream:
-                async for chunk in upstream.aiter_raw():
-                    yield chunk
-        except httpx.HTTPError as exc:
-            yield f'data: {{"type":"error","detail":"agent unreachable: {exc}"}}\n\n'.encode()
-
     return StreamingResponse(
-        relay(),
+        harness.relay_stream(
+            client(),
+            AGENT_URL,
+            req.message,
+            req.persona,
+            request.headers.get("authorization"),
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

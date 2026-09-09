@@ -71,7 +71,8 @@ warned. If you are moving these files, diff the tool descriptions afterwards.
 | [`mcp-maintenance/`](mcp-maintenance/) | History and work orders. 5 tools. |
 | [`mcp-control/`](mcp-control/) | Plant control, deliberately over-broad. 7 tools. |
 | [`agent/`](agent/) | The maintenance assistant, plus planning documents and the tool-calling reliability spike. |
-| [`ui/`](ui/) | The operator console: an industrial panel with analogue gauges and an amber CRT for the assistant. |
+| [`ui/`](ui/) | The operator console: an industrial panel with analogue gauges and an amber CRT for the assistant. Its BFF also holds the harness adapter. |
+| [`hermes/`](hermes/) | Containerfile for the alternative harness — the cai-krew image plus the `[mcp]` extra it ships without. |
 | [`deploy/`](deploy/) | Keycloak, Kuadrant/Authorino auth and authz manifests for the identity exercises. |
 
 Each MCP server is its own package, image and entrypoint, so a change to one
@@ -121,6 +122,34 @@ returns server-sent events and is what the console uses — the tool calls appea
 as they fire, which is how a participant sees what the agent *did* separately
 from what it *says* it did.
 
+### Swapping the harness
+
+BYOA is the premise, so the harness is a chart value. Setting `agent.harness`
+to `hermes` deploys [Hermes](https://hermes-agent.nousresearch.com/) instead,
+and the plant, the MCP servers, the policy layer and the console are untouched.
+It passes the golden workflow, reaching the same diagnosis by the same route —
+though it derates Pump 4 to 85% where ours picks 70%, which is why
+`grade()` scores the tool calls made and not the values chosen. A suite that
+asserted `speed == 70` would score a correct run at zero and would be measuring
+the framework rather than the platform.
+
+The console reaches a foreign harness through
+[`ui/src/waterplant_ui/harness.py`](ui/src/waterplant_ui/harness.py), which
+translates an OpenAI-compatible server into the console's own event shape. Two
+things it cannot translate, and does not pretend to:
+
+- **Identity stops at the console.** Hermes authenticates with one static server
+  key and rejects a participant token, so the BFF substitutes a service
+  credential. Scenarios 1, 4 and 6 need the caller's token to reach the tools.
+- **There is no tool trace.** Hermes runs its loop server-side and returns only
+  the finished answer, so the agent-trace panel has nothing to render. The
+  stream opens with a status line saying so rather than showing an empty panel.
+
+Both are reported through `/api/config` so an exercise fails loudly rather than
+silently. Both also argue the same thing: **tracing and identity belong at MCP
+Gateway, not inside the agent** — put there, they survive a harness swap. Right
+now our own agent is quietly holding up module 6.
+
 ---
 
 ## The golden workflow
@@ -153,7 +182,7 @@ turning the speed down and walking away.
 ## Running the tests
 
 Pure logic, no containers and no networking, so they behave identically on a
-laptop and in CI. **55 tests.** Python 3.12+ is required; the packages are
+laptop and in CI. **65 tests.** Python 3.12+ is required; the packages are
 hatchling-only, so a virtualenv built on an older interpreter cannot install
 them editable at all.
 
