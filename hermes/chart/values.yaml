@@ -10,7 +10,7 @@ namespace: wp-dev
 
 image:
   repository: quay.io/rlundber/agentops-rh1-hermes
-  tag: "0.3"
+  tag: "0.5"
   # Public quay.io repo — no imagePullSecret needed.
 
 llm:
@@ -30,6 +30,8 @@ mcp:
   transport: streamable-http
   serverName: gateway     # mcp_servers.<name> key in config.yaml AND the token filename
   sslVerify: true
+  # Caps a rejected/broken tool call's worst case (was defaulting to 300s).
+  toolTimeoutSeconds: 30
   # Where participant realms issue tokens from; add-participant.sh fills in the
   # per-participant realm path when it renders the init script.
   tokenUrlTemplate: "https://{keycloakHost}/realms/waterplant-{participant}/protocol/openid-connect/token"

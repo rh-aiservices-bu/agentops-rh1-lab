@@ -80,6 +80,7 @@ data:
         transport: {{ .Values.mcp.transport | quote }}
         auth: oauth
         ssl_verify: {{ .Values.mcp.sslVerify }}
+        timeout: {{ .Values.mcp.toolTimeoutSeconds }}
 
     agent:
       max_turns: 150
