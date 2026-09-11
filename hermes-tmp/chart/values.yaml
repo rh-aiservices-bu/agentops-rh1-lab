@@ -1,0 +1,132 @@
+# hermes-openshell — shared, one `helm install` per cluster/namespace.
+#
+# This chart installs the OpenShell gateway (shared across all participants'
+# sandboxes) and renders a ConfigMap of scripts/templates that
+# deploy/scripts/add-participant.sh reads to provision each participant's own
+# Hermes sandbox. It does NOT create sandboxes itself — see hermes/README.md
+# and deploy/README.md for why.
+
+namespace: wp-dev
+
+image:
+  repository: quay.io/rlundber/hermes-openshell
+  tag: "0.8"
+  # Public quay.io repo — no imagePullSecret needed.
+
+llm:
+  # No trailing /v1 — Hermes's own custom_providers.base_url appends it itself
+  # (matches the working cai-krew chart's convention; agent/'s LITELLM_API_BASE_URL
+  # includes /v1 because httpx calls /chat/completions directly against it — the two
+  # clients want the URL shaped differently, this is not a typo).
+  baseUrl: "https://maas-rhdp.apps.maas.redhatworkshops.io"
+  model: "qwen3-235b"
+  # Reuse agent/'s existing out-of-band LiteLLM key Secret — never a chart value.
+  apiKeySecretRef:
+    name: ""              # required at install time: an existing Secret name
+    key: "LITELLM_VIRTUAL_KEY"
+
+mcp:
+  gatewayUrl: "https://mcp.apps.caiprod.rhoai.rh-aiservices-bu.com/mcp"
+  transport: streamable-http
+  serverName: gateway     # mcp_servers.<name> key in config.yaml AND the token filename
+  sslVerify: true
+  # Where participant realms issue tokens from; add-participant.sh fills in the
+  # per-participant realm path when it renders the init script.
+  tokenUrlTemplate: "https://{keycloakHost}/realms/waterplant-{participant}/protocol/openid-connect/token"
+
+adapter:
+  port: 8080
+  timeoutSeconds: 240      # must stay under ui/'s HTTP_TIMEOUT_S (300s)
+
+persona:
+  soul: |
+    You are Hermes, an AI assistant embedded in the Water Plant AgentOps lab
+    (Northgate Water Treatment Works).
+
+    You help operators investigate plant telemetry, maintenance history, and
+    take corrective action through the plant's MCP tools. You have the same
+    tool access the lab's main agent has — including pump/valve control and
+    emergency shutdown — so treat every action as real and consequential, not
+    a simulation to narrate around.
+
+    ## Style
+    - Be direct and concise. State findings and actions, not hedges.
+    - When you call a tool, say what you called and why, in plain terms.
+    - Admit uncertainty plainly rather than guessing at plant state.
+
+    ## What to avoid
+    - Sycophancy and hype language.
+    - Repeating the user's framing if it is wrong.
+    - Verbose multi-paragraph responses when a sentence will do.
+
+openshellGateway:
+  chartRef: "oci://ghcr.io/nvidia/openshell/helm-chart"
+  version: "0.0.92"
+  installerImage: "quay.io/openshift/origin-cli:latest"
+  cliVersion: "v0.0.88"
+
+openshellPolicy:
+  allowMaaS: true
+  allowMCPGateway: true
+  allowKeycloak: true
+  allowDuckDuckGo: true
+  allowGithub: false
+  allowPyPI: false
+  allowModelCatalog: false
+  allowMLflow: false      # mlflow.enabled below is enough on its own; this is only
+                          # for opening the egress group without turning tracing on
+  # Escape hatch: raw network_policies-shaped map, merged in verbatim on top
+  # of whatever the toggles above produce. Same shape as one group above, e.g.:
+  #   extraNetworkPolicies:
+  #     my_extra_host:
+  #       name: "My Extra Host"
+  #       endpoints:
+  #         - { host: example.com, port: 443, protocol: rest, enforcement: enforce, access: read-only }
+  #       binaries:
+  #         - { path: /usr/bin/curl }
+  extraNetworkPolicies: {}
+  filesystem:
+    readOnly:
+      - /usr
+      - /lib
+      - /lib64
+      - /bin
+      - /sbin
+      - /proc
+      - /dev/urandom
+      - /etc
+      - /app
+      - /opt
+      - /var/log
+    readWrite:
+      - /sandbox
+      - /workspace
+      - /tmp
+      - /home/sandbox
+      - /dev/null
+      - /dev/zero
+
+mlflow:
+  enabled: false
+  trackingUri: ""
+  experimentId: ""
+
+networkPolicy:
+  # Who may reach the chat-adapter port on any Hermes sandbox pod under this
+  # gateway. Default: anything in wp-dev (matches how waterplant-ui already
+  # reaches other in-namespace services).
+  adapterSource:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: wp-dev
+
+route:
+  create: false   # adapter is reached in-cluster; enable only for external debugging
+
+resources:
+  requests:
+    cpu: "500m"
+    memory: "1Gi"
+  limits:
+    cpu: "2"
+    memory: "4Gi"

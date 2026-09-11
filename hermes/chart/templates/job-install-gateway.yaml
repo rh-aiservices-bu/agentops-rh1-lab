@@ -1,0 +1,172 @@
+# Installs a dedicated OpenShell gateway (StatefulSet) into this namespace.
+#
+# Runs as a Helm hook so `helm install hermes-openshell` is the single entry
+# point. Adapted from openshell/manifests/job-install-gateway.yaml in the
+# cai-krew hermes-container repo, with two deliberate differences:
+#   - does NOT install the agent-sandbox CRD/controller (cluster-scoped,
+#     already present on this cluster — see hermes/README.md); this also lets
+#     sa-bootstrap.yaml's RBAC stay narrower than the source manifest's
+#     cluster-admin grant.
+#   - does NOT create the namespace (wp-dev already exists per deploy/README.md).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: hermes-openshell-install-gateway
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "hermes-openshell.labels" . | nindent 4 }}
+  annotations:
+    # post-install, not pre-install: this Job's ServiceAccount (sa-bootstrap.yaml)
+    # is a normal chart resource, created during the main `helm install` apply —
+    # which happens *before* any hook runs. A pre-install hook would race that
+    # (confirmed live: "serviceaccount hermes-openshell-installer not found").
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        {{- include "hermes-openshell.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: hermes-openshell-installer
+      restartPolicy: Never
+      initContainers:
+        - name: get-helm
+          image: registry.access.redhat.com/ubi9/ubi
+          command:
+            - sh
+            - -c
+            - |
+              set -euo pipefail
+              HELM_VERSION="v3.17.3"
+              curl -fsSL "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" -o /tmp/helm.tar.gz
+              tar -xzf /tmp/helm.tar.gz -C /tmp
+              mv /tmp/linux-amd64/helm /tools/helm
+              chmod +x /tools/helm
+          volumeMounts:
+            - name: tools
+              mountPath: /tools
+        - name: gen-jwt-keys
+          image: registry.access.redhat.com/ubi9/ubi
+          command:
+            - sh
+            - -c
+            - |
+              set -euo pipefail
+              # openssl is already present in this base image — installing it via
+              # dnf fails here anyway: the pod runs as a random non-root UID under
+              # OpenShift's default SCC, and dnf needs root (confirmed live).
+              openssl genpkey -algorithm Ed25519 -out /jwt/signing.pem
+              openssl pkey -in /jwt/signing.pem -pubout -out /jwt/public.pem
+              kid=$(openssl pkey -in /jwt/signing.pem -pubout -outform DER \
+                  | openssl dgst -sha256 -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+              echo "$kid" > /jwt/kid.txt
+          volumeMounts:
+            - name: jwt-keys
+              mountPath: /jwt
+      containers:
+        - name: installer
+          image: {{ .Values.openshellGateway.installerImage | quote }}
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              export PATH="/tools:$PATH"
+
+              echo "============================================"
+              echo " OpenShell Gateway Install (wp-dev, hermes-openshell chart)"
+              echo " Namespace: $NAMESPACE"
+              echo "============================================"
+
+              echo "=== Grant privileged SCC to openshell-sandbox SA ==="
+              oc adm policy add-scc-to-user privileged -z openshell-sandbox -n "$NAMESPACE"
+
+              echo "=== Create JWT signing secret ==="
+              if oc -n "$NAMESPACE" get secret openshell-jwt-keys &>/dev/null; then
+                  echo "Secret 'openshell-jwt-keys' already exists, skipping"
+              else
+                  oc -n "$NAMESPACE" create secret generic openshell-jwt-keys \
+                      --from-file=signing.pem=/jwt/signing.pem \
+                      --from-file=public.pem=/jwt/public.pem \
+                      --from-file=kid=/jwt/kid.txt
+                  echo "JWT signing secret created"
+              fi
+
+              # Remove a stale openshell-node-reader ClusterRole/Binding left by an
+              # install in a different namespace, same as the source manifest.
+              echo "=== Clean up stale openshell-node-reader if namespace mismatch ==="
+              OWNER_NS=$(oc get clusterrole openshell-node-reader \
+                  -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-namespace}' 2>/dev/null || true)
+              if [ -n "$OWNER_NS" ] && [ "$OWNER_NS" != "$NAMESPACE" ]; then
+                  echo "Removing stale ClusterRole/openshell-node-reader (owned by release in $OWNER_NS)"
+                  oc delete clusterrole openshell-node-reader --ignore-not-found
+                  oc delete clusterrolebinding openshell-node-reader --ignore-not-found
+              fi
+
+              echo "=== Install OpenShell Helm chart ==="
+              helm upgrade --install openshell {{ .Values.openshellGateway.chartRef }} \
+                  --namespace "$NAMESPACE" \
+                  --version {{ .Values.openshellGateway.version | quote }} \
+                  --set pkiInitJob.enabled=false \
+                  --set server.disableTls=true \
+                  --set server.auth.allowUnauthenticatedUsers=true \
+                  --set podSecurityContext.fsGroup=null \
+                  --set securityContext.runAsUser=null
+
+              EXISTING_NS=$(oc get clusterrolebinding openshell-node-reader \
+                  -o jsonpath='{.subjects[0].namespace}' 2>/dev/null || true)
+              if [ -n "$EXISTING_NS" ] && [ "$EXISTING_NS" != "$NAMESPACE" ]; then
+                  echo "Patching ClusterRoleBinding for $NAMESPACE"
+                  oc patch clusterrolebinding openshell-node-reader --type='json' -p="[
+                    {\"op\":\"add\",\"path\":\"/subjects/-\",\"value\":{\"kind\":\"ServiceAccount\",\"name\":\"openshell\",\"namespace\":\"$NAMESPACE\"}}
+                  ]"
+              fi
+
+              echo "=== Wait for gateway rollout ==="
+              oc -n "$NAMESPACE" rollout status statefulset/openshell --timeout=300s
+
+              echo "=== Expose gateway via Route (internal use only, no external TLS needed) ==="
+              oc -n "$NAMESPACE" apply -f - <<'EOF'
+              apiVersion: route.openshift.io/v1
+              kind: Route
+              metadata:
+                name: hermes-openshell-gw
+                annotations:
+                  haproxy.router.openshift.io/enable-h2c: "true"
+              spec:
+                to:
+                  kind: Service
+                  name: openshell
+                port:
+                  targetPort: grpc
+              EOF
+
+              echo ""
+              echo "============================================"
+              echo " Gateway ready in $NAMESPACE."
+              echo " In-cluster endpoint: http://openshell.$NAMESPACE.svc.cluster.local:8080"
+              echo " Next: run deploy/scripts/add-participant.sh <name> to provision a sandbox."
+              echo "============================================"
+          env:
+            - name: NAMESPACE
+              value: {{ .Values.namespace | quote }}
+            - name: HELM_CACHE_HOME
+              value: /tmp/helm/cache
+            - name: HELM_CONFIG_HOME
+              value: /tmp/helm/config
+            - name: HELM_DATA_HOME
+              value: /tmp/helm/data
+          volumeMounts:
+            - name: tools
+              mountPath: /tools
+            - name: jwt-keys
+              mountPath: /jwt
+      volumes:
+        - name: tools
+          emptyDir: {}
+        - name: jwt-keys
+          emptyDir: {}

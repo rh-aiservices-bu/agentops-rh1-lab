@@ -19,6 +19,8 @@
 #   6. Adds the realm's issuer to control-mcp-authz      (tool-level authz, per-route)
 #   7. Appends the realm's issuer to MCPGatewayExtension (OAuth metadata)
 #   8. Creates admin/redhat user in participant realm with realm-admin rights
+#   9. If the hermes-openshell chart is installed: provisions this
+#      participant's Hermes-OpenShell sandbox (see hermes/README.md)
 #
 # Prerequisites:
 #   - oc logged in with rights to patch in both wp-dev and mcp-gateway namespaces
@@ -44,13 +46,16 @@ echo "    Issuer: ${ISSUER_URL}"
 echo ""
 
 # ── 1. Create the Keycloak realm ─────────────────────────────────────────────
-echo "[1/7] Applying Keycloak realm import..."
-sed "s/\${PARTICIPANT_NAME}/${NAME}/g" \
-  "${REPO_ROOT}/deploy/keycloak/realms/waterplant-realm-template.yaml" \
-  | oc apply -f -
+# Also provisions wp-dev/hermes-agent's client secret — generated fresh each
+# run; harmless to rotate since nothing outside this script and the
+# hermes-mcp-auth-<name> Secret it creates below depends on the old value.
+HERMES_AGENT_CLIENT_SECRET=$(openssl rand -hex 24)
+
+echo "[1/9] Applying Keycloak realm import..."
+sed -e "s/\${PARTICIPANT_NAME}/${NAME}/g" -e "s/\${HERMES_AGENT_CLIENT_SECRET}/${HERMES_AGENT_CLIENT_SECRET}/g" "${REPO_ROOT}/deploy/keycloak/realms/waterplant-realm-template.yaml" | oc apply -f -
 
 # ── 2. Wait for realm import ──────────────────────────────────────────────────
-echo "[2/7] Waiting for realm import to complete (up to 90s)..."
+echo "[2/9] Waiting for realm import to complete (up to 90s)..."
 DEADLINE=$(( $(date +%s) + 90 ))
 while true; do
   DONE=$(oc get keycloakrealmimport "${REALM}" -n wp-dev \
@@ -91,21 +96,21 @@ patch_auth_policy() {
 }
 
 # ── 3. mcp-auth-policy (public mcp listener, mcp-gateway namespace) ──────────
-echo "[3/7] Patching mcp-auth-policy..."
+echo "[3/9] Patching mcp-auth-policy..."
 patch_auth_policy mcp-auth-policy mcp-gateway
 
 # ── 4–6. Per-route authz policies (wp-dev namespace) ─────────────────────────
-echo "[4/7] Patching telemetry-mcp-authz..."
+echo "[4/9] Patching telemetry-mcp-authz..."
 patch_authpolicy telemetry-mcp-authz wp-dev
 
-echo "[5/7] Patching maintenance-mcp-authz..."
+echo "[5/9] Patching maintenance-mcp-authz..."
 patch_authpolicy maintenance-mcp-authz wp-dev
 
-echo "[6/7] Patching control-mcp-authz..."
+echo "[6/9] Patching control-mcp-authz..."
 patch_authpolicy control-mcp-authz wp-dev
 
 # ── 7. MCPGatewayExtension authorizationServers ───────────────────────────────
-echo "[7/7] Appending issuer to MCPGatewayExtension..."
+echo "[7/9] Appending issuer to MCPGatewayExtension..."
 CURRENT_SERVERS=$(oc get mcpgatewayextension mcp-extension -n mcp-gateway \
   -o jsonpath='{.spec.oauthProtectedResource.authorizationServers}')
 if echo "${CURRENT_SERVERS}" | grep -qF "${ISSUER_URL}"; then
@@ -133,7 +138,7 @@ echo "    (NOT: dump_plant_configuration, emergency_shutdown — see Scenarios 3
 # Username: <name>-admin  Password: redhat
 # Grants full realm-admin rights; logs in at /admin/waterplant-<name>/console
 ADMIN_USERNAME="${NAME}-admin"
-echo "[8/8] Creating realm admin user (${ADMIN_USERNAME}/redhat) in ${REALM}..."
+echo "[8/9] Creating realm admin user (${ADMIN_USERNAME}/redhat) in ${REALM}..."
 
 TEMP_USER=$(oc get secret keycloak-initial-admin -n wp-dev -o jsonpath='{.data.username}' | base64 -d)
 TEMP_PASS=$(oc get secret keycloak-initial-admin -n wp-dev -o jsonpath='{.data.password}' | base64 -d)
@@ -185,4 +190,28 @@ if [ -n "${ADMIN_ID}" ]; then
   echo "    realm-admin role assigned."
 else
   echo "    WARNING: could not locate admin user — skipping role assignment"
+fi
+
+# ── 9. Provision this participant's Hermes-OpenShell sandbox (optional) ──────
+# Only if the hermes-openshell chart has been installed — see hermes/README.md
+# and deploy/README.md. Skipped (not failed) otherwise, so this script keeps
+# working on setups that don't deploy Hermes at all.
+echo ""
+if oc get configmap hermes-openshell-scripts -n wp-dev &>/dev/null; then
+  echo "[9/9] Provisioning Hermes-OpenShell sandbox for '${NAME}'..."
+  HERMES_TOKEN_URL="${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/token"
+  # Bearer key for Hermes's own api_server platform (ui/harness.py's "openai"
+  # protocol authenticates with this, not a Keycloak token) — see
+  # gateway/platforms/api_server.py's API_SERVER_KEY requirement.
+  API_SERVER_KEY=$(openssl rand -hex 24)
+  oc create secret generic "hermes-mcp-auth-${NAME}" -n wp-dev \
+    --from-literal=MCP_CLIENT_ID="wp-dev/hermes-agent" \
+    --from-literal=MCP_CLIENT_SECRET="${HERMES_AGENT_CLIENT_SECRET}" \
+    --from-literal=MCP_TOKEN_URL="${HERMES_TOKEN_URL}" \
+    --from-literal=API_SERVER_KEY="${API_SERVER_KEY}" \
+    --dry-run=client -o yaml | oc apply -f -
+  "${SCRIPT_DIR}/provision-hermes-sandbox.sh" "${NAME}"
+else
+  echo "[9/9] hermes-openshell chart not installed in wp-dev — skipping Hermes provisioning."
+  echo "       (helm install hermes-openshell hermes/chart -n wp-dev, then re-run this script)"
 fi

@@ -183,11 +183,16 @@ whose tool access can be configured independently.
 
 The script:
 1. Renders `deploy/keycloak/realms/waterplant-realm-template.yaml` with the
-   participant name and applies it
+   participant name (and a fresh `wp-dev/hermes-agent` client secret) and applies it
 2. Polls until the realm import completes
-3. Patches `mcp-auth-policy` to accept JWTs from the new realm
-4. Patches `mcp-authz-policy` to validate tool-call JWTs from the new realm
-5. Appends the realm's issuer URL to the `MCPGatewayExtension` authorization server list
+3. Patches `mcp-auth-policy` to accept JWTs from the new realm (public listener)
+4. Patches `telemetry-mcp-authz` to validate tool-call JWTs from the new realm
+5. Patches `maintenance-mcp-authz` to validate tool-call JWTs from the new realm
+6. Patches `control-mcp-authz` to validate tool-call JWTs from the new realm
+7. Appends the realm's issuer URL to the `MCPGatewayExtension` authorization server list
+8. Creates a `<name>-admin`/`redhat` realm-admin user in the new realm
+9. If the `hermes-openshell` chart is installed (Step 7 below): provisions this
+   participant's Hermes-OpenShell sandbox
 
 The Keycloak hostname is derived automatically from the live route — no hardcoded values.
 
@@ -210,6 +215,92 @@ tool roles as part of the lab exercises:
 
 ```
 https://<keycloak-host>/admin/waterplant-<name>/console
+```
+
+---
+
+## Step 7 — Deploy Hermes (OpenShell agent) — optional
+
+A second AI agent for the lab, alongside `agent/`: Hermes, run inside an
+[OpenShell](https://github.com/nvidia/openshell) sandbox. It runs
+`hermes gateway run` with its built-in OpenAI-compatible `api_server`
+platform, which `ui/src/waterplant_ui/harness.py`'s `AGENT_PROTOCOL=openai`
+path talks to directly — see [`hermes/README.md`](../hermes/README.md) for
+the full design, including a known, deliberate tradeoff this build accepts:
+Hermes's own LLM/MCP/web calls run in the sandbox pod's default network
+namespace (so the Service can reach the api_server at all), not through
+`openshell sandbox exec`'s policy-enforced one — network-policy enforcement
+is not currently in effect for this path. An earlier, retired design
+(`hermes-tmp/`) drove per-turn `hermes -z` oneshot calls through
+`openshell sandbox exec` instead, which did keep network calls
+policy-enforced but couldn't reuse Hermes's own streaming/session/API-server
+features — see `hermes-tmp/README.md` if reviving that tradeoff is ever worth it.
+
+This step is optional and independent of Steps 1–6 — skip it if you only need
+the core telemetry/maintenance/control lab.
+
+### 7a. Provision an LLM key Secret (reuses `agent/`'s existing convention)
+
+```bash
+oc create secret generic litellm-key -n wp-dev \
+  --from-literal=LITELLM_VIRTUAL_KEY=<key> --dry-run=client -o yaml | oc apply -f -
+```
+
+If `agent/` is already deployed, reuse its existing Secret name instead of
+creating a new one — see `hermes/chart/values.yaml`'s `llm.apiKeySecretRef`
+comment for the shared-fate tradeoff (both agents draw from the same
+rate-limited MaaS quota).
+
+### 7b. Install the shared OpenShell gateway
+
+One `helm install` per cluster — installs a dedicated OpenShell gateway in
+`wp-dev` (independent of any other OpenShell deployment elsewhere on the
+cluster) and renders the config/policy ConfigMap that
+`add-participant.sh` reads for each participant's sandbox:
+
+```bash
+helm install hermes-openshell hermes/chart -n wp-dev \
+  --set llm.apiKeySecretRef.name=litellm-key
+oc logs -f job/hermes-openshell-install-gateway -n wp-dev
+```
+
+Tune what the OpenShell sandbox policy allows/blocks via
+`hermes/chart/values.yaml`'s `openshellPolicy.*` (network egress allowlist
+toggles + an `extraNetworkPolicies` escape hatch, filesystem read-only/read-write
+lists) — pass overrides with `-f my-overrides.yaml` or `--set`.
+
+### 7c. Provision Hermes for each participant
+
+Already wired into `add-participant.sh` — if the chart above is installed
+before you run it, each participant automatically gets their own Hermes
+sandbox, Keycloak `wp-dev/hermes-agent` client (full tool access — see
+`hermes/README.md`), and Service. Re-run `add-participant.sh <name>` for a
+participant created before you installed the chart to provision Hermes for
+them retroactively.
+
+### 7d. Point the UI at one participant's Hermes
+
+`waterplant-ui` has a single `AGENT_URL` — with Hermes provisioned
+per-participant, only one can be the live target at a time. Requires
+`AGENT_PROTOCOL=openai` and the participant's `API_SERVER_KEY` (printed at
+the end of `provision-hermes-sandbox.sh`'s output, also readable from the
+`hermes-mcp-auth-<name>` Secret):
+
+```bash
+oc set env deployment/waterplant-ui -n wp-dev \
+  AGENT_URL=http://hermes-<name>.wp-dev.svc:8080 \
+  AGENT_PROTOCOL=openai \
+  AGENT_API_KEY=<the API_SERVER_KEY printed by provision-hermes-sandbox.sh>
+```
+
+### Verify
+
+```bash
+oc get sandbox default--hermes-<name> -n wp-dev
+oc get pods -n wp-dev -l app.kubernetes.io/name=hermes-sandbox,app.kubernetes.io/instance=<name>
+oc get svc hermes-<name> -n wp-dev
+oc run curl-test --rm -it --restart=Never -n wp-dev --image=registry.access.redhat.com/ubi9/ubi-minimal \
+  -- curl -s http://hermes-<name>.wp-dev.svc:8080/health
 ```
 
 ---
@@ -315,8 +406,16 @@ deploy/
 ├── auth/                          # Auth policy reference docs (JWT validation)
 ├── authz/                         # Authz policy reference doc (tool-level CEL rules)
 └── scripts/
-    └── add-participant.sh         # Provisions a new lab participant end-to-end
+    ├── add-participant.sh         # Provisions a new lab participant end-to-end
+    └── provision-hermes-sandbox.sh  # Per-participant Hermes sandbox — called by
+                                      # add-participant.sh, see hermes/README.md
 ```
+
+Hermes itself (the OpenShell-sandboxed agent and its Helm chart) lives in
+[`hermes/`](../hermes/) at the repo root, not under `deploy/` — see that
+directory's own README for why. The retired chat-adapter-based design (an
+alternative that kept network-policy enforcement at the cost of Hermes's own
+streaming/session features) is preserved at `hermes-tmp/`.
 
 ---
 
@@ -335,3 +434,15 @@ deploy/
   ```
   and update the client IDs in `waterplant-realm-template.yaml` and any existing
   participant realms accordingly.
+- **Hermes (Step 7) network-policy enforcement is a known, accepted gap in this
+  build** — `hermes gateway run` runs in the sandbox pod's default network
+  namespace (required for the Service to reach it at all), not through
+  `openshell sandbox exec`'s policy-enforced one, so its own LLM/MCP/web calls
+  are not currently subject to `openshellPolicy`'s network allowlist. See
+  `hermes/README.md` and this repo's plan history for the full
+  reachability-vs-enforcement tradeoff and the retired alternative
+  (`hermes-tmp/`) that kept enforcement at the cost of Hermes's native
+  streaming/session features.
+- **Hermes is per-participant but the UI is single-tenant** — `waterplant-ui`
+  has one `AGENT_URL`; only one participant's Hermes can be the live chat
+  backend at a time. See Step 7d.
