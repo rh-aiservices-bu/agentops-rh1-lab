@@ -96,11 +96,23 @@ spec:
               set -euo pipefail
               export PATH="/tools:\$PATH"
               export HOME=/tmp
+              export XDG_CONFIG_HOME=/tmp/.config
 
               step() { echo ""; echo "=== \$* ==="; }
 
+              step "Install gateway mTLS client cert"
+              # The gateway's TLS listener requires a client cert unconditionally
+              # once TLS is on (confirmed live: a request with no cert fails at
+              # the TLS handshake itself, not with a 401 — allowUnauthenticatedUsers
+              # only affects application-level auth, not the transport). The CLI
+              # looks for it at this exact path, keyed by the sanitized gateway
+              # name passed to 'gateway add --name' below — see
+              # crates/openshell-cli/src/tls.rs.
+              mkdir -p "\${XDG_CONFIG_HOME}/openshell/gateways/openshift/mtls"
+              cp /mtls/ca.crt /mtls/tls.crt /mtls/tls.key "\${XDG_CONFIG_HOME}/openshell/gateways/openshift/mtls/"
+
               step "Register gateway"
-              openshell gateway add "http://openshell.${NAMESPACE}.svc.cluster.local:8080" --local --name openshift
+              openshell gateway add "https://openshell.${NAMESPACE}.svc.cluster.local:8080" --local --name openshift
               openshell gateway select openshift
 
               step "Register LLM provider"
@@ -182,7 +194,14 @@ spec:
               export MCP_SERVER_NAME='${MCP_SERVER_NAME}'
               export SANDBOX_NAME='${SANDBOX_NAME}'
               export API_SERVER_ENABLED=true
-              export API_SERVER_HOST=0.0.0.0
+              # Loopback only: openshell service expose relays to 127.0.0.1
+              # inside the sandbox's own network namespace, not 0.0.0.0 on
+              # whichever namespace a plain 'oc exec' would attach to (those
+              # are two different loopback interfaces — confirmed live, this
+              # is why the previous 'oc exec'-started process was unreachable
+              # via the relay even though curl-from-inside-the-pod could see
+              # it fine).
+              export API_SERVER_HOST=127.0.0.1
               export API_SERVER_PORT='${ADAPTER_PORT}'
               export API_SERVER_KEY='\${API_SERVER_KEY}'
               export SANDBOX_ENV_LOADED=1
@@ -216,27 +235,45 @@ spec:
               openshell sandbox exec --name "${SANDBOX_NAME}" -- /bin/sh -c \
                   ". /sandbox/.sandbox-init.sh && (setsid sh -c 'python3 /sandbox/mcp-token-refresh.py --loop 1200 < /dev/null > /sandbox/mcp-token-refresh.log 2>&1' < /dev/null > /dev/null 2>&1 &) ; echo refresher-started"
 
-              step "Start hermes gateway run (plain oc exec — must run in the pod's default netns to be Service-reachable via the api_server platform; this test build deliberately does NOT route it through openshell sandbox exec, so its own LLM/MCP/web calls are not network-policy-enforced — see hermes/README.md)"
-              oc exec "default--${SANDBOX_NAME}" -n "${NAMESPACE}" -- /bin/sh -c \
+              step "Start hermes gateway run (openshell sandbox exec — policy-enforced)"
+              # Routed through openshell sandbox exec, not plain oc exec: this
+              # puts the process in the sandbox's own Landlock-policy-enforced
+              # network namespace, which is what openshell service expose
+              # relays into (127.0.0.1 there, not on the pod's default netns).
+              # Same subshell+setsid daemonization pattern as the token
+              # refresher above — required for the same reason (see its
+              # comment): otherwise the exec call hangs waiting for the
+              # backgrounded process to exit.
+              openshell sandbox exec --name "${SANDBOX_NAME}" -- /bin/sh -c \
                   ". /sandbox/.sandbox-init.sh && (setsid sh -c 'hermes gateway run < /dev/null > /sandbox/hermes-gateway.log 2>&1' < /dev/null > /dev/null 2>&1 &) ; sleep 1 && echo gateway-started"
 
-              step "Verify"
+              step "Verify hermes gateway run is up (from inside its own netns)"
               sleep 5
-              oc exec "default--${SANDBOX_NAME}" -n "${NAMESPACE}" -- /bin/sh -c \
+              openshell sandbox exec --name "${SANDBOX_NAME}" -- /bin/sh -c \
                   "ps aux | grep -v grep | grep 'hermes gateway' && echo gateway-running || echo 'WARNING: hermes gateway run not running'"
-              oc exec "default--${SANDBOX_NAME}" -n "${NAMESPACE}" -- /bin/sh -c \
-                  "curl -sf --max-time 5 http://localhost:${ADAPTER_PORT}/health && echo '' && echo health-ok || echo 'WARNING: api_server /health not responding yet'"
+              openshell sandbox exec --name "${SANDBOX_NAME}" -- /bin/sh -c \
+                  "curl -sf --max-time 5 http://127.0.0.1:${ADAPTER_PORT}/health && echo '' && echo health-ok || echo 'WARNING: api_server /health not responding yet'"
 
-              step "Label the sandbox pod for Service/NetworkPolicy selectors"
-              # The agent-sandbox CRD's own pod labels (agents.x-k8s.io/sandbox-name-hash,
-              # topology.*) aren't predictable/selector-friendly — confirmed live, not
-              # guessed (the openshell.ai/* labels live on the Sandbox CR, not the Pod).
-              # Stamp our own so the Service created below can actually find this pod.
-              oc label pod "default--${SANDBOX_NAME}" -n "${NAMESPACE}" \
-                  app.kubernetes.io/name=hermes-sandbox app.kubernetes.io/instance="${NAME}" --overwrite
+              step "Expose it through the gateway's service relay"
+              openshell service expose "${SANDBOX_NAME}" "${ADAPTER_PORT}" openai
+              RELAY_URL="https://default--${SANDBOX_NAME}--openai.openshell.localhost:8080/"
+              echo "Relay URL: \${RELAY_URL}"
+
+              step "Verify the relay end-to-end (mTLS, from this Job's own pod — a non-loopback caller relative to the gateway, same position waterplant-ui will be in)"
+              GATEWAY_IP=\$(getent hosts "openshell.${NAMESPACE}.svc.cluster.local" | awk '{print \$1}')
+              curl -sk --max-time 10 -o /dev/null -w '%{http_code}\n' \
+                  --resolve "default--${SANDBOX_NAME}--openai.openshell.localhost:8080:\${GATEWAY_IP}" \
+                  --cacert "\${XDG_CONFIG_HOME}/openshell/gateways/openshift/mtls/ca.crt" \
+                  --cert "\${XDG_CONFIG_HOME}/openshell/gateways/openshift/mtls/tls.crt" \
+                  --key "\${XDG_CONFIG_HOME}/openshell/gateways/openshift/mtls/tls.key" \
+                  -X POST "\${RELAY_URL}v1/chat/completions" \
+                  -H "content-type: application/json" \
+                  -H "authorization: Bearer \${API_SERVER_KEY}" \
+                  -d '{"model":"hermes","messages":[{"role":"user","content":"ping"}],"max_tokens":5}' \
+                  | grep -q '^200$' && echo relay-verified || echo 'WARNING: relay verification did not return 200'
 
               echo ""
-              echo "Sandbox ${SANDBOX_NAME} ready."
+              echo "Sandbox ${SANDBOX_NAME} ready. Relay URL: \${RELAY_URL}"
           envFrom:
             - secretRef:
                 name: hermes-mcp-auth-${NAME}
@@ -255,6 +292,8 @@ spec:
               mountPath: /tools
             - name: scripts
               mountPath: /scripts
+            - name: mtls
+              mountPath: /mtls
       volumes:
         - name: tools
           emptyDir: {}
@@ -262,41 +301,39 @@ spec:
           configMap:
             name: hermes-openshell-scripts
             defaultMode: 0755
+        - name: mtls
+          secret:
+            secretName: openshell-client-tls
 EOF
 
 echo "    Waiting for job/${JOB_NAME}..."
 oc logs -f "job/${JOB_NAME}" -n "${NAMESPACE}" || true
 oc wait --for=condition=complete "job/${JOB_NAME}" -n "${NAMESPACE}" --timeout=600s
 
-# ── Service exposing Hermes's api_server platform ────────────────────────────
-echo "    Creating Service ${SANDBOX_NAME}..."
-cat <<EOF | oc apply -n "${NAMESPACE}" -f -
-apiVersion: v1
-kind: Service
-metadata:
-  name: ${SANDBOX_NAME}
-  labels:
-    app.kubernetes.io/name: hermes-openshell
-    app.kubernetes.io/instance: ${NAME}
-spec:
-  selector:
-    app.kubernetes.io/name: hermes-sandbox
-    app.kubernetes.io/instance: ${NAME}
-  ports:
-    - name: http
-      port: ${ADAPTER_PORT}
-      targetPort: ${ADAPTER_PORT}
-      protocol: TCP
-EOF
-
+# ── Reachability is now via the OpenShell gateway's service relay, not a
+# Kubernetes Service — the sandbox's process runs in a policy-enforced
+# network namespace with no direct Pod-IP route from other pods; the gateway
+# relays into it over the same outbound session used for `sandbox exec`. See
+# hermes/README.md.
+RELAY_URL="https://default--${SANDBOX_NAME}--openai.openshell.localhost:8080/"
 API_SERVER_KEY=$(oc get secret "hermes-mcp-auth-${NAME}" -n "${NAMESPACE}" -o jsonpath='{.data.API_SERVER_KEY}' | base64 -d)
 
 echo ""
-echo "Done. Hermes for '${NAME}' is reachable in-cluster at:"
-echo "  http://${SANDBOX_NAME}.${NAMESPACE}.svc:${ADAPTER_PORT}"
+echo "Done. Hermes for '${NAME}' is reachable through the OpenShell gateway relay at:"
+echo "  ${RELAY_URL}"
 echo ""
-echo "Point the UI at it with:"
+echo "This is not real DNS — it's a synthetic hostname the gateway's TLS cert covers"
+echo "via a wildcard SAN. Callers need: (1) an /etc/hosts or hostAliases entry mapping"
+echo "it to the openshell Service's ClusterIP, and (2) the openshell-client-tls Secret's"
+echo "ca.crt/tls.crt/tls.key presented as an mTLS client cert (the gateway requires one"
+echo "unconditionally once TLS is on — confirmed live, not just an auth-header check)."
+echo "See deploy/README.md Step 7d for how waterplant-ui is wired up for this."
+echo ""
+echo "Point the UI at it with (see deploy/README.md for the volume/hostAliases patch):"
 echo "  oc set env deployment/waterplant-ui -n ${NAMESPACE} \\"
-echo "    AGENT_URL=http://${SANDBOX_NAME}.${NAMESPACE}.svc:${ADAPTER_PORT} \\"
+echo "    AGENT_URL=${RELAY_URL} \\"
 echo "    AGENT_PROTOCOL=openai \\"
-echo "    AGENT_API_KEY=${API_SERVER_KEY}"
+echo "    AGENT_API_KEY=${API_SERVER_KEY} \\"
+echo "    AGENT_TLS_CA=/etc/openshell-mtls/ca.crt \\"
+echo "    AGENT_TLS_CERT=/etc/openshell-mtls/tls.crt \\"
+echo "    AGENT_TLS_KEY=/etc/openshell-mtls/tls.key"

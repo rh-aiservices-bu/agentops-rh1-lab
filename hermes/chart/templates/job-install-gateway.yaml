@@ -85,6 +85,15 @@ spec:
               echo "=== Grant privileged SCC to openshell-sandbox SA ==="
               oc adm policy add-scc-to-user privileged -z openshell-sandbox -n "$NAMESPACE"
 
+              {{- if .Values.openshellGateway.enableTls }}
+              # With TLS enabled, the vendor chart's own pre-upgrade "certgen"
+              # hook creates openshell-jwt-keys itself (alongside the
+              # server/client TLS secrets it also needs) — it refuses to run
+              # if it finds openshell-jwt-keys already there without its TLS
+              # siblings ("partial PKI state", confirmed live). Don't create
+              # it ourselves in this mode.
+              echo "=== JWT signing secret: left to the chart's own certgen hook (TLS mode) ==="
+              {{- else }}
               echo "=== Create JWT signing secret ==="
               if oc -n "$NAMESPACE" get secret openshell-jwt-keys &>/dev/null; then
                   echo "Secret 'openshell-jwt-keys' already exists, skipping"
@@ -95,6 +104,7 @@ spec:
                       --from-file=kid=/jwt/kid.txt
                   echo "JWT signing secret created"
               fi
+              {{- end }}
 
               # Remove a stale openshell-node-reader ClusterRole/Binding left by an
               # install in a different namespace, same as the source manifest.
@@ -111,9 +121,11 @@ spec:
               helm upgrade --install openshell {{ .Values.openshellGateway.chartRef }} \
                   --namespace "$NAMESPACE" \
                   --version {{ .Values.openshellGateway.version | quote }} \
+                  {{- if not .Values.openshellGateway.enableTls }}
                   --set pkiInitJob.enabled=false \
                   --set server.disableTls=true \
-                  --set server.auth.allowUnauthenticatedUsers=true \
+                  {{- end }}
+                  --set server.auth.allowUnauthenticatedUsers={{ .Values.openshellGateway.allowUnauthenticatedUsers }} \
                   --set podSecurityContext.fsGroup=null \
                   --set securityContext.runAsUser=null
 

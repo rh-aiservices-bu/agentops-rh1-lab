@@ -14,6 +14,7 @@ consequence of a tool call independently of what the agent claims happened.
 from __future__ import annotations
 
 import os
+import ssl
 from pathlib import Path
 from typing import Any, Literal
 
@@ -34,6 +35,15 @@ MLFLOW_URL = os.environ.get("MLFLOW_URL", "")
 # through the shared endpoint's 429s. A 30s timeout cut off healthy requests.
 TIMEOUT_S = float(os.environ.get("HTTP_TIMEOUT_S", "300"))
 
+# Set only when AGENT_URL is an OpenShell gateway service-relay URL
+# (https://default--<sandbox>--<name>.openshell.localhost:8080/) — that
+# gateway requires mTLS on every caller, not just an auth header, so the
+# client cert/key/CA have to be presented at the TLS layer itself. See
+# hermes/README.md.
+AGENT_TLS_CA = os.environ.get("AGENT_TLS_CA", "")
+AGENT_TLS_CERT = os.environ.get("AGENT_TLS_CERT", "")
+AGENT_TLS_KEY = os.environ.get("AGENT_TLS_KEY", "")
+
 STATIC = Path(__file__).parent / "static"
 
 app = FastAPI(title="Water Plant UI", version="0.1.0")
@@ -43,7 +53,17 @@ _client: httpx.AsyncClient | None = None
 def client() -> httpx.AsyncClient:
     global _client
     if _client is None:
-        _client = httpx.AsyncClient(timeout=TIMEOUT_S)
+        kwargs: dict[str, Any] = {"timeout": TIMEOUT_S}
+        if AGENT_TLS_CA and AGENT_TLS_CERT and AGENT_TLS_KEY:
+            # httpx 0.28's verify=<ca path> + cert=(cert, key) combination
+            # silently fails to present the client cert (confirmed live: the
+            # server's TLS layer sees no certificate at all and rejects the
+            # handshake) — building the SSLContext ourselves and loading the
+            # chain into it directly is what actually works.
+            ctx = ssl.create_default_context(cafile=AGENT_TLS_CA)
+            ctx.load_cert_chain(AGENT_TLS_CERT, AGENT_TLS_KEY)
+            kwargs["verify"] = ctx
+        _client = httpx.AsyncClient(**kwargs)
     return _client
 
 

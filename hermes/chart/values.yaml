@@ -10,7 +10,7 @@ namespace: wp-dev
 
 image:
   repository: quay.io/rlundber/agentops-rh1-hermes
-  tag: "0.1"
+  tag: "0.2"
   # Public quay.io repo — no imagePullSecret needed.
 
 llm:
@@ -64,6 +64,18 @@ openshellGateway:
   version: "0.0.92"
   installerImage: "quay.io/openshift/origin-cli:latest"
   cliVersion: "v0.0.88"
+  # The chart's own default (pkiInitJob.enabled=true, TLS on) bakes
+  # openshell.localhost/*.openshell.localhost into the gateway's self-signed
+  # cert, which `openshell service expose` needs for anything beyond a
+  # loopback caller. Set false to fall back to the older plaintext-only
+  # install (simpler, but service exposure won't work for non-loopback
+  # callers like waterplant-ui — see hermes/README.md).
+  enableTls: true
+  # Skips OIDC/JWT auth on the gateway's gRPC control plane AND (unconfirmed,
+  # this is exactly what we're testing) possibly the HTTP service-relay path
+  # too. Keep true for this lab; a real deployment would configure oidc.*
+  # against the participant's Keycloak realm instead.
+  allowUnauthenticatedUsers: true
 
 openshellPolicy:
   allowMaaS: true
