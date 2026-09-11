@@ -281,26 +281,77 @@ them retroactively.
 ### 7d. Point the UI at one participant's Hermes
 
 `waterplant-ui` has a single `AGENT_URL` — with Hermes provisioned
-per-participant, only one can be the live target at a time. Requires
-`AGENT_PROTOCOL=openai` and the participant's `API_SERVER_KEY` (printed at
-the end of `provision-hermes-sandbox.sh`'s output, also readable from the
-`hermes-mcp-auth-<name>` Secret):
+per-participant, only one can be the live target at a time.
+
+Hermes is reached through the OpenShell gateway's **service relay**, not a
+plain Kubernetes Service (see `hermes/README.md`'s Architecture section for
+why: it's what lets Hermes run policy-enforced *and* stay reachable). That
+means `waterplant-ui` needs an mTLS client cert, a fake-hostname resolution
+entry, and — because the relay hop plus a busy shared MaaS endpoint means
+Hermes can go quiet for longer than the Router's default timeout — a longer
+Route idle timeout. None of the four commands below have a committed
+manifest behind them (`waterplant-ui`'s Deployment and Route were both
+created imperatively); re-run all four by hand whenever either is recreated
+from scratch, not just the first time.
 
 ```bash
-oc set env deployment/waterplant-ui -n wp-dev \
-  AGENT_URL=http://hermes-<name>.wp-dev.svc:8080 \
+NAME=<participant name, e.g. demo>
+NAMESPACE=wp-dev
+GATEWAY_IP=$(oc get svc openshell -n "${NAMESPACE}" -o jsonpath='{.spec.clusterIP}')
+API_SERVER_KEY=$(oc get secret "hermes-mcp-auth-${NAME}" -n "${NAMESPACE}" -o jsonpath='{.data.API_SERVER_KEY}' | base64 -d)
+
+# 1. mTLS client cert, so waterplant-ui can present one to the gateway
+#    (required unconditionally once the gateway's TLS is on — not just an
+#    auth-header check, the TLS handshake itself fails without it).
+oc set volumes deployment/waterplant-ui -n "${NAMESPACE}" \
+  --add --name=openshell-mtls --type=secret --secret-name=openshell-client-tls \
+  --mount-path=/etc/openshell-mtls --read-only=true
+
+# 2. The relay URL's hostname isn't real DNS — map it to the gateway's
+#    ClusterIP so waterplant-ui's own TLS/SNI still target the right name.
+oc patch deployment/waterplant-ui -n "${NAMESPACE}" --type=json -p="[
+  {\"op\":\"add\",\"path\":\"/spec/template/spec/hostAliases\",\"value\":[{\"ip\":\"${GATEWAY_IP}\",\"hostnames\":[\"default--hermes-${NAME}--openai.openshell.localhost\"]}]}
+]"
+
+# 3. Point AGENT_URL at the relay, not a Service DNS name, and tell
+#    ui/src/waterplant_ui/app.py where to find the cert files from step 1.
+oc set env deployment/waterplant-ui -n "${NAMESPACE}" \
+  AGENT_URL="https://default--hermes-${NAME}--openai.openshell.localhost:8080/" \
   AGENT_PROTOCOL=openai \
-  AGENT_API_KEY=<the API_SERVER_KEY printed by provision-hermes-sandbox.sh>
+  AGENT_API_KEY="${API_SERVER_KEY}" \
+  AGENT_TLS_CA=/etc/openshell-mtls/ca.crt \
+  AGENT_TLS_CERT=/etc/openshell-mtls/tls.crt \
+  AGENT_TLS_KEY=/etc/openshell-mtls/tls.key
+
+# 4. The OpenShift Router's default idle timeout (~30s) kills the SSE
+#    connection mid-answer whenever Hermes pauses for a stretch (an LLM
+#    turn, a tool call) — confirmed live via a Route-level
+#    "transfer closed with outstanding read data remaining". 310s, not
+#    more: stay just above app.py's own HTTP_TIMEOUT_S (300s) so the Route
+#    never outlives what the app itself would already give up at.
+oc annotate route waterplant-ui -n "${NAMESPACE}" \
+  haproxy.router.openshift.io/timeout=310s --overwrite
 ```
+
+If `waterplant-ui`'s Deployment ever gets fully rebuilt (not just restarted
+— e.g. `oc delete deployment/waterplant-ui` then recreated), steps 1-2 need
+re-running; if the Route is ever recreated, step 4 does. Steps 1-3 also need
+re-running whenever a *different* participant's Hermes becomes the live
+target (the hostname and Secret both change).
 
 ### Verify
 
 ```bash
 oc get sandbox default--hermes-<name> -n wp-dev
 oc get pods -n wp-dev -l app.kubernetes.io/name=hermes-sandbox,app.kubernetes.io/instance=<name>
-oc get svc hermes-<name> -n wp-dev
-oc run curl-test --rm -it --restart=Never -n wp-dev --image=registry.access.redhat.com/ubi9/ubi-minimal \
-  -- curl -s http://hermes-<name>.wp-dev.svc:8080/health
+oc get secret openshell-client-tls -n wp-dev   # the mTLS cert waterplant-ui mounts
+oc get route waterplant-ui -n wp-dev -o jsonpath='{.metadata.annotations}'  # timeout should be present
+
+# Full round-trip through the UI's own backend (not just curling Hermes directly):
+UI_POD=$(oc get pod -n wp-dev -l app=waterplant-ui -o jsonpath='{.items[0].metadata.name}')
+oc exec "$UI_POD" -n wp-dev -- curl -s -X POST http://localhost:8080/api/chat \
+  -H "content-type: application/json" \
+  -d '{"message":"What is the current plant safety status?"}'
 ```
 
 ---
