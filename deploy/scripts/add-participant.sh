@@ -204,9 +204,20 @@ if oc get configmap hermes-openshell-scripts -n wp-dev &>/dev/null; then
   # protocol authenticates with this, not a Keycloak token) — see
   # gateway/platforms/api_server.py's API_SERVER_KEY requirement.
   API_SERVER_KEY=$(openssl rand -hex 24)
+  # Hermes's own MCP calls authenticate as the realm's "operator" user via
+  # the public mcp-gateway client (password grant), not as the
+  # wp-dev/hermes-agent service account — deliberately: hermes-agent's client
+  # roles mirror full tool access (including dump_plant_configuration,
+  # emergency_shutdown), which every chat through the UI could otherwise
+  # trigger regardless of the persona selected there (identity never reaches
+  # Hermes on this path — see hermes/README.md's "no per-user attribution"
+  # gap). Using the operator's own credentials caps Hermes at exactly what
+  # the operator persona is allowed, for now — not real per-user identity
+  # propagation, just a lower default ceiling.
   oc create secret generic "hermes-mcp-auth-${NAME}" -n wp-dev \
-    --from-literal=MCP_CLIENT_ID="wp-dev/hermes-agent" \
-    --from-literal=MCP_CLIENT_SECRET="${HERMES_AGENT_CLIENT_SECRET}" \
+    --from-literal=MCP_CLIENT_ID="mcp-gateway" \
+    --from-literal=MCP_USERNAME="operator" \
+    --from-literal=MCP_PASSWORD="operator" \
     --from-literal=MCP_TOKEN_URL="${HERMES_TOKEN_URL}" \
     --from-literal=API_SERVER_KEY="${API_SERVER_KEY}" \
     --dry-run=client -o yaml | oc apply -f -

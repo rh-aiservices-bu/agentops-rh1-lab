@@ -7,8 +7,13 @@ but runs as an in-process background loop instead of an external CronJob +
 `oc exec` — this adapter already runs inside the sandbox, so there's no need
 for the extra pods/exec RBAC or a second container image.
 
-Fetches a token via the OAuth 2.0 client_credentials grant against this
-participant's Keycloak realm and writes it to
+Fetches a token via the OAuth 2.0 Resource Owner Password Credentials grant,
+authenticating as the realm's `operator` user through the public `mcp-gateway`
+client (directAccessGrantsEnabled) — the same identity and tool-role scope a
+human operator gets, deliberately, not Hermes's own `wp-dev/hermes-agent`
+service-account identity (which has full tool access, including tools the
+operator persona is withheld from — see hermes/README.md's "no per-user
+attribution" gap). Writes the token to
 $HERMES_HOME/mcp-tokens/<server_name>.json. Hermes picks up the refreshed
 token automatically via its built-in disk-watch
 (MCPOAuthManager.invalidate_if_disk_changed) — no restart needed.
@@ -20,7 +25,8 @@ caller (.sandbox-init.sh / the setup script) loops this with `sleep`.
 
 stdlib only.
 
-Required env vars: MCP_CLIENT_ID, MCP_CLIENT_SECRET, MCP_TOKEN_URL.
+Required env vars: MCP_CLIENT_ID (the public client, "mcp-gateway"),
+MCP_USERNAME, MCP_PASSWORD, MCP_TOKEN_URL.
 Optional: MCP_SERVER_NAME (default "gateway", must match config.yaml's
 mcp_servers key), HERMES_HOME (default /sandbox/.hermes).
 """
@@ -45,14 +51,16 @@ def _log(*args: object) -> None:
 def refresh_once() -> None:
     keycloak_url = os.environ["MCP_TOKEN_URL"]
     client_id = os.environ["MCP_CLIENT_ID"]
-    client_secret = os.environ["MCP_CLIENT_SECRET"]
+    username = os.environ["MCP_USERNAME"]
+    password = os.environ["MCP_PASSWORD"]
     server_name = os.environ.get("MCP_SERVER_NAME", "gateway")
 
     data = urllib.parse.urlencode(
         {
-            "grant_type": "client_credentials",
+            "grant_type": "password",
             "client_id": client_id,
-            "client_secret": client_secret,
+            "username": username,
+            "password": password,
         }
     ).encode()
 

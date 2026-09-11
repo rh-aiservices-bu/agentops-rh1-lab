@@ -40,17 +40,39 @@ data:
       - hermes-cli
       - {{ .Values.mcp.serverName }}
 
-    # api_server platform (hermes gateway run --  the console talks to this
-    # via ui/harness.py's "openai" protocol). host/port/key are read from
-    # API_SERVER_HOST/PORT/KEY env vars (see .sandbox-init.sh) with these as
-    # the config.yaml fallback — set both since which one the running
-    # hermes-agent version actually prefers wasn't confirmed against source
-    # before this test build (upstream rate-limited further research).
+    # Disables hermes-agent's own one-shot approval prompt for execute_code /
+    # dangerous terminal commands (tools/approval.py's check_execute_code_guard
+    # / check_dangerous_command) — there is no approval surface on this
+    # headless api_server path (no TTY, no gateway-side approval UI wired up),
+    # so every such call fails closed with "approval is one-shot for this
+    # run" until a human never arrives to grant it. Safe to turn off *because*
+    # OpenShell's Landlock policy (openshellPolicy.filesystem/network in
+    # values.yaml), not this approval layer, is this deployment's actual
+    # enforcement boundary — same reasoning as platforms.api_server.extra.skip_auth
+    # above. A deployment without a real sandbox underneath should not copy
+    # this value.
+    approvals:
+      mode: "off"
+
+    # api_server platform (hermes gateway run — the console talks to this via
+    # ui/harness.py's "openai" protocol). Confirmed against source
+    # (gateway/config.py's GatewayConfig.from_dict -> PlatformConfig.from_dict):
+    # top-level host/port/key here are NOT read at all — PlatformConfig only
+    # pulls from a nested "extra:" key. The actual host/port/key in effect
+    # come exclusively from the API_SERVER_HOST/PORT/KEY env vars (see
+    # .sandbox-init.sh). host/port below are kept only as human-readable
+    # documentation of what those env vars are set to — harmless dead config,
+    # not a fallback. skip_auth, added for the OpenShell service-relay path
+    # (see hermes/README.md and _check_auth in gateway/platforms/api_server.py),
+    # DOES need the extra: nesting to actually take effect — this is that
+    # nesting, not a copy-paste of the pattern above.
     platforms:
       api_server:
         enabled: true
         host: 0.0.0.0
         port: {{ .Values.adapter.port }}
+        extra:
+          skip_auth: true
 
     mcp_servers:
       {{ .Values.mcp.serverName }}:
@@ -116,13 +138,6 @@ data:
     security:
       redact_secrets: true
       tirith_enabled: true
-
-    # Manual approvals — irrelevant to the chat-adapter path (hermes -z
-    # auto-bypasses approvals regardless of this setting); matters only if
-    # someone connects interactively via `openshell sandbox connect`.
-    approvals:
-      mode: manual
-      timeout: 60
 
     display:
       compact: false

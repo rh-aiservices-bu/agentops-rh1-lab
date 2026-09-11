@@ -10,7 +10,7 @@ namespace: wp-dev
 
 image:
   repository: quay.io/rlundber/agentops-rh1-hermes
-  tag: "0.2"
+  tag: "0.3"
   # Public quay.io repo — no imagePullSecret needed.
 
 llm:
