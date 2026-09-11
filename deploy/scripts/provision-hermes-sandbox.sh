@@ -202,6 +202,56 @@ spec:
               openshell sandbox exec --name "${SANDBOX_NAME}" -- /bin/sh -c \
                   ". /sandbox/.sandbox-init.sh && (setsid sh -c 'python3 /sandbox/mcp-token-refresh.py --loop 1200 < /dev/null > /sandbox/mcp-token-refresh.log 2>&1' < /dev/null > /dev/null 2>&1 &) ; echo refresher-started"
 
+              step "Install hermes_otel plugin (MLflow tracing)"
+              if [ -n "${MLFLOW_TRACKING_URI}" ]; then
+                  curl -fsSL https://github.com/briancaffey/hermes-otel/archive/refs/heads/main.tar.gz -o /tmp/ho-src.tar.gz
+                  mkdir -p /tmp/hermes-otel-src
+                  # hermes_otel/ lives one level inside the repo root — extract
+                  # just that subtree, stripping both path components.
+                  tar -xzf /tmp/ho-src.tar.gz --strip-components=2 -C /tmp/hermes-otel-src hermes-otel-main/hermes_otel
+                  rm /tmp/ho-src.tar.gz
+                  tar -czf /tmp/ho.tar.gz -C /tmp/hermes-otel-src .
+                  rm -rf /tmp/hermes-otel-src
+                  HO_B64=\$(base64 -w0 /tmp/ho.tar.gz)
+                  rm /tmp/ho.tar.gz
+                  split -b 20000 <(printf '%s' "\${HO_B64}") /tmp/ho_chunk_
+                  FIRST=1
+                  for CHUNK_FILE in /tmp/ho_chunk_*; do
+                      CHUNK=\$(cat "\${CHUNK_FILE}")
+                      if [ "\${FIRST}" = "1" ]; then
+                          openshell sandbox exec --name "${SANDBOX_NAME}" -- /bin/sh -c "printf '%s' '\${CHUNK}' > /tmp/ho.b64"
+                          FIRST=0
+                      else
+                          openshell sandbox exec --name "${SANDBOX_NAME}" -- /bin/sh -c "printf '%s' '\${CHUNK}' >> /tmp/ho.b64"
+                      fi
+                  done
+                  rm -f /tmp/ho_chunk_*
+                  openshell sandbox exec --name "${SANDBOX_NAME}" -- /bin/sh -c \
+                      "mkdir -p /sandbox/.hermes/plugins/hermes_otel && base64 -d /tmp/ho.b64 | tar -xzf - -C /sandbox/.hermes/plugins/hermes_otel && rm /tmp/ho.b64 && echo hermes_otel-uploaded"
+              fi
+
+              step "Configure hermes_otel (MLflow)"
+              if [ -n "${MLFLOW_TRACKING_URI}" ]; then
+                  MLFLOW_SA_TOKEN=\$(oc create token hermes-openshell-installer -n ${NAMESPACE} --duration=8760h)
+                  MLFLOW_EXPERIMENT_ID=\$(curl -sk -H "Authorization: Bearer \${MLFLOW_SA_TOKEN}" -H "X-MLflow-Workspace: ${NAMESPACE}" \
+                      "${MLFLOW_TRACKING_URI}/api/2.0/mlflow/experiments/get-by-name?experiment_name=${NAME}" \
+                      | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('experiment',{}).get('experiment_id',''))" 2>/dev/null)
+                  if [ -z "\${MLFLOW_EXPERIMENT_ID}" ]; then
+                      MLFLOW_EXPERIMENT_ID=\$(curl -sk -X POST -H "Authorization: Bearer \${MLFLOW_SA_TOKEN}" -H "X-MLflow-Workspace: ${NAMESPACE}" \
+                          -H "Content-Type: application/json" -d '{"name":"${NAME}"}' \
+                          "${MLFLOW_TRACKING_URI}/api/2.0/mlflow/experiments/create" \
+                          | python3 -c "import sys,json; print(json.load(sys.stdin)['experiment_id'])")
+                  fi
+                  echo "MLflow experiment '${NAME}' => ID \${MLFLOW_EXPERIMENT_ID}"
+                  sed \
+                      -e "s|\\\${MLFLOW_EXPERIMENT_ID}|\${MLFLOW_EXPERIMENT_ID}|g" \
+                      -e "s|\\\${MLFLOW_SA_TOKEN}|\${MLFLOW_SA_TOKEN}|g" \
+                      /scripts/hermes-otel-config.yaml.template > /tmp/hermes-otel-config.yaml
+                  OTEL_B64=\$(base64 -w0 /tmp/hermes-otel-config.yaml)
+                  openshell sandbox exec --name "${SANDBOX_NAME}" -- /bin/sh -c \
+                      "mkdir -p /sandbox/.hermes/plugins/hermes_otel && printf '%s' '\${OTEL_B64}' | base64 -d > /sandbox/.hermes/plugins/hermes_otel/config.yaml && echo hermes_otel-config-ok"
+              fi
+
               step "Start hermes gateway run (openshell sandbox exec — policy-enforced)"
               # Must run via sandbox exec (not oc exec) — see hermes/README.md.
               openshell sandbox exec --name "${SANDBOX_NAME}" -- /bin/sh -c \

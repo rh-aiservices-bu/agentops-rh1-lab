@@ -29,6 +29,11 @@ data:
       - hermes-cli
       - {{ .Values.mcp.serverName }}
 
+    {{- if .Values.mlflow.enabled }}
+    plugins:
+      enabled: [hermes_otel]
+    {{- end }}
+
     # No approval surface on this headless path; OpenShell's Landlock
     # policy is the real enforcement boundary here. See hermes/README.md.
     approvals:
@@ -145,8 +150,9 @@ data:
         metrics: false
         logs: false
         headers:
-          x-mlflow-experiment-id: {{ .Values.mlflow.experimentId | quote }}
-          Authorization: "Bearer ${MLFLOW_TRACKING_TOKEN}"
+          x-mlflow-experiment-id: "${MLFLOW_EXPERIMENT_ID}"
+          Authorization: "Bearer ${MLFLOW_SA_TOKEN}"
+          X-MLflow-Workspace: {{ .Values.namespace | quote }}
 {{- end }}
 
   policy-standard.yaml.template: |
@@ -335,3 +341,4 @@ data:
     # Named ADAPTER_PORT for historical continuity; it's api_server's port.
     ADAPTER_PORT={{ .Values.adapter.port }}
     OPENSHELL_CLI_VERSION={{ .Values.openshellGateway.cliVersion }}
+    MLFLOW_TRACKING_URI={{ .Values.mlflow.trackingUri }}

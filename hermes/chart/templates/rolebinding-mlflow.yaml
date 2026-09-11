@@ -1,0 +1,20 @@
+{{- if .Values.mlflow.enabled }}
+# Authorizes hermes-openshell-installer's SA token (used as the MLflow
+# Authorization bearer — see provision-hermes-sandbox.sh) against RHOAI's
+# MLflow operator, scoped to this namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hermes-openshell-installer-mlflow
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "hermes-openshell.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: mlflow-operator-mlflow-integration
+subjects:
+  - kind: ServiceAccount
+    name: hermes-openshell-installer
+    namespace: {{ .Values.namespace }}
+{{- end }}

@@ -165,13 +165,13 @@ fi
 # Locate the user
 ADMIN_ID=$(curl -sk "${KEYCLOAK_URL}/admin/realms/${REALM}/users?username=${ADMIN_USERNAME}" \
   -H "Authorization: Bearer ${KC_TOKEN}" \
-  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['id'] if d else '')")
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['id'] if isinstance(d, list) and d else '')")
 
 if [ -n "${ADMIN_ID}" ]; then
   # Get the realm-management client UUID (built-in, always present)
   RM_CLIENT_ID=$(curl -sk "${KEYCLOAK_URL}/admin/realms/${REALM}/clients?clientId=realm-management" \
     -H "Authorization: Bearer ${KC_TOKEN}" \
-    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['id'] if d else '')")
+    | python3 -c "import sys,json; d=json.load(sys.stdin); print(d[0]['id'] if isinstance(d, list) and d else '')")
 
   # Get the realm-admin composite role (grants full realm management)
   REALM_ADMIN_ROLE=$(curl -sk \

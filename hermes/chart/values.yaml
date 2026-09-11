@@ -108,9 +108,10 @@ openshellPolicy:
       - /dev/zero
 
 mlflow:
-  enabled: false
-  trackingUri: ""
-  experimentId: ""
+  enabled: true
+  trackingUri: "https://rh-ai.apps.caiprod.rhoai.rh-aiservices-bu.com/mlflow"
+  # Experiment ID is resolved per participant at provision time (named
+  # after the participant, auto-created if missing) — not a static value.
 
 networkPolicy:
   # Who may reach the chat-adapter port on any Hermes sandbox pod under this
