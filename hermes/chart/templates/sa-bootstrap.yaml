@@ -1,10 +1,5 @@
-# RBAC for the gateway-install hook Job.
-#
-# Deliberately narrower than the source manifest (openshell/manifests/sa-installer.yaml
-# in the cai-krew hermes-container repo), which grants blanket cluster-admin. Only the
-# SCC-use grant and the apps-domain lookup are genuinely cluster-scoped; everything
-# else the install Job does (StatefulSet/Route/Secret/ConfigMap creation) is
-# namespace-scoped, so it gets namespace `admin` instead.
+# RBAC for the gateway-install hook Job. Narrower than the upstream manifest
+# (cluster-admin) — only genuinely cluster-scoped bits get a ClusterRole below.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -45,22 +40,11 @@ rules:
   - apiGroups: ["config.openshift.io"]
     resources: ["ingresses"]
     verbs: ["get"]
-  # The vendor OpenShell Helm chart (installed by job-install-gateway.yaml via
-  # `helm upgrade --install`) provisions its own cluster-scoped RBAC
-  # (ClusterRole/ClusterRoleBinding "openshell-node-reader"). RBAC's `create`
-  # verb cannot be scoped by resourceNames, so this is the one place this
-  # chart can't narrow below "any ClusterRole/ClusterRoleBinding" — still far
-  # short of cluster-admin, and the Job also cleans up a stale
-  # openshell-node-reader left behind by a previous install in another
-  # namespace (see job-install-gateway.yaml).
+  # The vendor chart provisions its own cluster-scoped RBAC (openshell-node-reader).
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterroles", "clusterrolebindings"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
-  # RBAC escalation prevention: Kubernetes refuses to let a principal grant
-  # permissions it doesn't itself hold. The vendor OpenShell chart's own
-  # ClusterRole/Role (openshell-node-reader, openshell-sandbox) need these —
-  # confirmed live, not guessed, from the exact "attempting to grant RBAC
-  # permissions not currently held" error on first install attempt.
+  # Needed so this SA can grant RBAC the vendor chart's own roles need.
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get"]

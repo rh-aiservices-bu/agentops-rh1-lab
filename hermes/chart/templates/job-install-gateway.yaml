@@ -1,13 +1,6 @@
-# Installs a dedicated OpenShell gateway (StatefulSet) into this namespace.
-#
-# Runs as a Helm hook so `helm install hermes-openshell` is the single entry
-# point. Adapted from openshell/manifests/job-install-gateway.yaml in the
-# cai-krew hermes-container repo, with two deliberate differences:
-#   - does NOT install the agent-sandbox CRD/controller (cluster-scoped,
-#     already present on this cluster — see hermes/README.md); this also lets
-#     sa-bootstrap.yaml's RBAC stay narrower than the source manifest's
-#     cluster-admin grant.
-#   - does NOT create the namespace (wp-dev already exists per deploy/README.md).
+# Installs a dedicated OpenShell gateway (StatefulSet) via a Helm hook.
+# Unlike the upstream manifest, doesn't install the cluster-scoped
+# agent-sandbox CRD (already present) or create the namespace.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -16,10 +9,8 @@ metadata:
   labels:
     {{- include "hermes-openshell.labels" . | nindent 4 }}
   annotations:
-    # post-install, not pre-install: this Job's ServiceAccount (sa-bootstrap.yaml)
-    # is a normal chart resource, created during the main `helm install` apply —
-    # which happens *before* any hook runs. A pre-install hook would race that
-    # (confirmed live: "serviceaccount hermes-openshell-installer not found").
+    # post-install, not pre-install: a pre-install hook races the ServiceAccount
+    # in sa-bootstrap.yaml, which is only created by the main helm install apply.
     helm.sh/hook: post-install,post-upgrade
     helm.sh/hook-weight: "0"
     helm.sh/hook-delete-policy: before-hook-creation
@@ -56,9 +47,7 @@ spec:
             - -c
             - |
               set -euo pipefail
-              # openssl is already present in this base image — installing it via
-              # dnf fails here anyway: the pod runs as a random non-root UID under
-              # OpenShift's default SCC, and dnf needs root (confirmed live).
+              # openssl is already in this image; dnf install would need root.
               openssl genpkey -algorithm Ed25519 -out /jwt/signing.pem
               openssl pkey -in /jwt/signing.pem -pubout -out /jwt/public.pem
               kid=$(openssl pkey -in /jwt/signing.pem -pubout -outform DER \
@@ -86,12 +75,7 @@ spec:
               oc adm policy add-scc-to-user privileged -z openshell-sandbox -n "$NAMESPACE"
 
               {{- if .Values.openshellGateway.enableTls }}
-              # With TLS enabled, the vendor chart's own pre-upgrade "certgen"
-              # hook creates openshell-jwt-keys itself (alongside the
-              # server/client TLS secrets it also needs) — it refuses to run
-              # if it finds openshell-jwt-keys already there without its TLS
-              # siblings ("partial PKI state", confirmed live). Don't create
-              # it ourselves in this mode.
+              # TLS mode: the vendor chart's own certgen hook creates this secret.
               echo "=== JWT signing secret: left to the chart's own certgen hook (TLS mode) ==="
               {{- else }}
               echo "=== Create JWT signing secret ==="
@@ -106,8 +90,6 @@ spec:
               fi
               {{- end }}
 
-              # Remove a stale openshell-node-reader ClusterRole/Binding left by an
-              # install in a different namespace, same as the source manifest.
               echo "=== Clean up stale openshell-node-reader if namespace mismatch ==="
               OWNER_NS=$(oc get clusterrole openshell-node-reader \
                   -o jsonpath='{.metadata.annotations.meta\.helm\.sh/release-namespace}' 2>/dev/null || true)

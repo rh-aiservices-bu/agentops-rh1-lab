@@ -1,9 +1,6 @@
 # Renders the config/policy templates + adapter scripts that
-# deploy/scripts/add-participant.sh reads (via `oc extract`) to provision each
-# participant's Hermes sandbox. Adapted from openshell/manifests/configmap-scripts.yaml
-# in the cai-krew hermes-container repo, trimmed per hermes/README.md's "smallest
-# config" goal — see hermes-config.yaml.template's comment for exactly what was
-# dropped and why.
+# deploy/scripts/add-participant.sh reads to provision each participant's
+# Hermes sandbox.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -14,15 +11,7 @@ metadata:
 data:
   hermes-config.yaml.template: |
     # Hermes Agent config — Water Plant AgentOps lab (OpenShell sandbox variant).
-    # Rendered once by this chart (model/mcp/web are fixed per-cluster), with
-    # ${OPENAI_API_KEY} substituted per-sandbox by add-participant.sh from a
-    # Secret (never baked into this ConfigMap).
-    #
-    # Trimmed from the source template: no mem0 memory, no SDXL image_gen, no
-    # Slack/Mattermost gateway blocks (the custom UI replaces both), no
-    # kanban/curator/delegation (unused without multi-agent/kanban use), no
-    # external model_catalog URL (avoids an untracked network dependency).
-    # Added: mcp_servers (absent from the source template entirely).
+    # ${OPENAI_API_KEY} is substituted per-sandbox by add-participant.sh.
 
     model:
       default: {{ .Values.llm.model | quote }}
@@ -40,32 +29,14 @@ data:
       - hermes-cli
       - {{ .Values.mcp.serverName }}
 
-    # Disables hermes-agent's own one-shot approval prompt for execute_code /
-    # dangerous terminal commands (tools/approval.py's check_execute_code_guard
-    # / check_dangerous_command) — there is no approval surface on this
-    # headless api_server path (no TTY, no gateway-side approval UI wired up),
-    # so every such call fails closed with "approval is one-shot for this
-    # run" until a human never arrives to grant it. Safe to turn off *because*
-    # OpenShell's Landlock policy (openshellPolicy.filesystem/network in
-    # values.yaml), not this approval layer, is this deployment's actual
-    # enforcement boundary — same reasoning as platforms.api_server.extra.skip_auth
-    # above. A deployment without a real sandbox underneath should not copy
-    # this value.
+    # No approval surface on this headless path; OpenShell's Landlock
+    # policy is the real enforcement boundary here. See hermes/README.md.
     approvals:
       mode: "off"
 
-    # api_server platform (hermes gateway run — the console talks to this via
-    # ui/harness.py's "openai" protocol). Confirmed against source
-    # (gateway/config.py's GatewayConfig.from_dict -> PlatformConfig.from_dict):
-    # top-level host/port/key here are NOT read at all — PlatformConfig only
-    # pulls from a nested "extra:" key. The actual host/port/key in effect
-    # come exclusively from the API_SERVER_HOST/PORT/KEY env vars (see
-    # .sandbox-init.sh). host/port below are kept only as human-readable
-    # documentation of what those env vars are set to — harmless dead config,
-    # not a fallback. skip_auth, added for the OpenShell service-relay path
-    # (see hermes/README.md and _check_auth in gateway/platforms/api_server.py),
-    # DOES need the extra: nesting to actually take effect — this is that
-    # nesting, not a copy-paste of the pattern above.
+    # host/port here are display-only — actual values come from
+    # API_SERVER_HOST/PORT env vars (see .sandbox-init.sh). skip_auth needs
+    # the extra: nesting to take effect; see hermes/README.md.
     platforms:
       api_server:
         enabled: true
@@ -179,12 +150,8 @@ data:
 {{- end }}
 
   policy-standard.yaml.template: |
-    # OpenShell sandbox policy — Water Plant AgentOps lab.
-    # Network egress is an explicit allowlist: named groups pair which
-    # hosts/ports/access-level are reachable with which local binaries may
-    # reach them. Anything not listed here is blocked by Landlock. Toggle
-    # groups on/off via hermes/chart/values.yaml's openshellPolicy.allow* —
-    # see hermes/README.md.
+    # OpenShell sandbox policy. Egress is an explicit allowlist; anything
+    # not listed is blocked. Toggle groups via values.yaml's openshellPolicy.*
 
     version: 1
 
@@ -351,18 +318,13 @@ data:
 {{ toYaml $group | indent 8 }}
 {{- end }}
 
-  # chat-adapter.py is intentionally not embedded here — this build starts
-  # `hermes gateway run` (its own OpenAI-compatible API server) directly
-  # instead of driving oneshot `hermes -z` calls per turn. See hermes/README.md
-  # and hermes-tmp/ for the retired adapter-based design, kept intact for
-  # reference/fallback.
+  # chat-adapter.py isn't embedded here — see hermes-tmp/ for that
+  # retired design; this build runs `hermes gateway run` directly.
 
   mcp-token-refresh.py: |
 {{ .Files.Get "files/mcp-token-refresh.py" | indent 4 }}
 
-  # Small, non-secret metadata read by deploy/scripts/provision-hermes-sandbox.sh
-  # so the bash script doesn't hardcode anything this chart's values.yaml already
-  # controls. Never contains the LLM key itself — only where to look it up.
+  # Non-secret metadata read by provision-hermes-sandbox.sh.
   provision.env: |
     IMAGE_REF={{ .Values.image.repository }}:{{ .Values.image.tag }}
     LLM_API_KEY_SECRET_NAME={{ .Values.llm.apiKeySecretRef.name }}
@@ -370,8 +332,6 @@ data:
     LLM_MODEL={{ .Values.llm.model }}
     LLM_BASE_URL={{ .Values.llm.baseUrl }}
     MCP_SERVER_NAME={{ .Values.mcp.serverName }}
-    # Still named ADAPTER_PORT for values.yaml/provision-hermes-sandbox.sh
-    # continuity — now the port `hermes gateway run`'s api_server platform
-    # listens on, not a separate adapter process.
+    # Named ADAPTER_PORT for historical continuity; it's api_server's port.
     ADAPTER_PORT={{ .Values.adapter.port }}
     OPENSHELL_CLI_VERSION={{ .Values.openshellGateway.cliVersion }}

@@ -1,10 +1,6 @@
 # hermes-openshell — shared, one `helm install` per cluster/namespace.
-#
-# This chart installs the OpenShell gateway (shared across all participants'
-# sandboxes) and renders a ConfigMap of scripts/templates that
-# deploy/scripts/add-participant.sh reads to provision each participant's own
-# Hermes sandbox. It does NOT create sandboxes itself — see hermes/README.md
-# and deploy/README.md for why.
+# Installs the OpenShell gateway and renders the ConfigMap
+# add-participant.sh reads to provision each participant's sandbox.
 
 namespace: wp-dev
 
@@ -14,10 +10,7 @@ image:
   # Public quay.io repo — no imagePullSecret needed.
 
 llm:
-  # No trailing /v1 — Hermes's own custom_providers.base_url appends it itself
-  # (matches the working cai-krew chart's convention; agent/'s LITELLM_API_BASE_URL
-  # includes /v1 because httpx calls /chat/completions directly against it — the two
-  # clients want the URL shaped differently, this is not a typo).
+  # No trailing /v1 — Hermes's custom_providers.base_url appends it itself.
   baseUrl: "https://maas-rhdp.apps.maas.redhatworkshops.io"
   model: "qwen3-235b"
   # Reuse agent/'s existing out-of-band LiteLLM key Secret — never a chart value.
@@ -66,17 +59,11 @@ openshellGateway:
   version: "0.0.92"
   installerImage: "quay.io/openshift/origin-cli:latest"
   cliVersion: "v0.0.88"
-  # The chart's own default (pkiInitJob.enabled=true, TLS on) bakes
-  # openshell.localhost/*.openshell.localhost into the gateway's self-signed
-  # cert, which `openshell service expose` needs for anything beyond a
-  # loopback caller. Set false to fall back to the older plaintext-only
-  # install (simpler, but service exposure won't work for non-loopback
-  # callers like waterplant-ui — see hermes/README.md).
+  # Needed for `openshell service expose` to work for non-loopback callers
+  # like waterplant-ui. See hermes/README.md.
   enableTls: true
-  # Skips OIDC/JWT auth on the gateway's gRPC control plane AND (unconfirmed,
-  # this is exactly what we're testing) possibly the HTTP service-relay path
-  # too. Keep true for this lab; a real deployment would configure oidc.*
-  # against the participant's Keycloak realm instead.
+  # Skips OIDC/JWT auth on the gateway's control plane. Fine for this lab;
+  # a real deployment would configure oidc.* instead.
   allowUnauthenticatedUsers: true
 
 openshellPolicy:

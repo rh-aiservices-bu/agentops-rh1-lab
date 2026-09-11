@@ -46,9 +46,7 @@ echo "    Issuer: ${ISSUER_URL}"
 echo ""
 
 # ── 1. Create the Keycloak realm ─────────────────────────────────────────────
-# Also provisions wp-dev/hermes-agent's client secret — generated fresh each
-# run; harmless to rotate since nothing outside this script and the
-# hermes-mcp-auth-<name> Secret it creates below depends on the old value.
+# Also provisions wp-dev/hermes-agent's client secret (rotated each run).
 HERMES_AGENT_CLIENT_SECRET=$(openssl rand -hex 24)
 
 echo "[1/9] Applying Keycloak realm import..."
@@ -193,27 +191,16 @@ else
 fi
 
 # ── 9. Provision this participant's Hermes-OpenShell sandbox (optional) ──────
-# Only if the hermes-openshell chart has been installed — see hermes/README.md
-# and deploy/README.md. Skipped (not failed) otherwise, so this script keeps
-# working on setups that don't deploy Hermes at all.
+# Skipped (not failed) if the hermes-openshell chart isn't installed.
 echo ""
 if oc get configmap hermes-openshell-scripts -n wp-dev &>/dev/null; then
   echo "[9/9] Provisioning Hermes-OpenShell sandbox for '${NAME}'..."
   HERMES_TOKEN_URL="${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/token"
-  # Bearer key for Hermes's own api_server platform (ui/harness.py's "openai"
-  # protocol authenticates with this, not a Keycloak token) — see
-  # gateway/platforms/api_server.py's API_SERVER_KEY requirement.
+  # api_server's own bearer key — see gateway/platforms/api_server.py.
   API_SERVER_KEY=$(openssl rand -hex 24)
-  # Hermes's own MCP calls authenticate as the realm's "operator" user via
-  # the public mcp-gateway client (password grant), not as the
-  # wp-dev/hermes-agent service account — deliberately: hermes-agent's client
-  # roles mirror full tool access (including dump_plant_configuration,
-  # emergency_shutdown), which every chat through the UI could otherwise
-  # trigger regardless of the persona selected there (identity never reaches
-  # Hermes on this path — see hermes/README.md's "no per-user attribution"
-  # gap). Using the operator's own credentials caps Hermes at exactly what
-  # the operator persona is allowed, for now — not real per-user identity
-  # propagation, just a lower default ceiling.
+  # Hermes authenticates to MCP as the realm's "operator" user (password
+  # grant via mcp-gateway), not wp-dev/hermes-agent's full-access service
+  # account — caps Hermes at the operator's own tool scope. See hermes/README.md.
   oc create secret generic "hermes-mcp-auth-${NAME}" -n wp-dev \
     --from-literal=MCP_CLIENT_ID="mcp-gateway" \
     --from-literal=MCP_USERNAME="operator" \

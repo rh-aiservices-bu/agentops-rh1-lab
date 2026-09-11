@@ -1,16 +1,6 @@
-# Sandbox pods are locked down by default — confirmed on the existing
-# cai-crew deployment, whose `openshell-sandbox-ssh` NetworkPolicy allows
-# ingress ONLY on port 2222 (the gateway's own exec tunnel). Anything else,
-# including our chat adapter's port, needs an explicit rule.
-#
-# IMPORTANT: `openshell.ai/managed-by`/`openshell.ai/sandbox-name` labels live
-# on the Sandbox *custom resource*, not the underlying Pod — confirmed live,
-# not assumed (the Pod only carries agents.x-k8s.io/sandbox-name-hash, a
-# non-deterministic hash, plus topology labels). provision-hermes-sandbox.sh
-# stamps `app.kubernetes.io/name=hermes-sandbox` onto each sandbox Pod after
-# creation specifically so this selector (and the matching Service selector)
-# has something real to match. One static NetworkPolicy still covers every
-# participant's Hermes sandbox, since this gateway is dedicated to Hermes.
+# Sandbox pods deny ingress by default except the gateway's own exec tunnel
+# (port 2222). app.kubernetes.io/name=hermes-sandbox is stamped onto each
+# pod by provision-hermes-sandbox.sh (the Sandbox CR's own labels aren't on the Pod).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
