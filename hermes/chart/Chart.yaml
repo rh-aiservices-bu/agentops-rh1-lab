@@ -1,0 +1,10 @@
+apiVersion: v2
+name: hermes-openshell
+description: >-
+  Shared OpenShell gateway + rendered config/policy scripts for Hermes agents
+  in the Water Plant AgentOps lab. Per-participant sandboxes are provisioned
+  separately by deploy/scripts/add-participant.sh, which reads the ConfigMap
+  this chart renders.
+type: application
+version: 0.1.0
+appVersion: "0.8"

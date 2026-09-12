@@ -32,7 +32,7 @@ from typing import Any, AsyncIterator
 import httpx
 
 from . import settings
-from .runtime import SYSTEM_PROMPT, RateLimited
+from .runtime import SYSTEM_PROMPT, RateLimited, opening_messages
 from .tools import open_tools
 
 
@@ -136,7 +136,11 @@ def _summarise(text: str, limit: int = 160) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
-async def run_stream(message: str, token: str | None = None) -> AsyncIterator[dict]:
+async def run_stream(
+    message: str,
+    token: str | None = None,
+    history: list[dict[str, str]] | None = None,
+) -> AsyncIterator[dict]:
     retries = [0]
 
     async with open_tools(token) as session:
@@ -145,10 +149,7 @@ async def run_stream(message: str, token: str | None = None) -> AsyncIterator[di
             "message": f"{len(session.schemas)} tools across {len(session.clients)} servers",
         }
 
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": message},
-        ]
+        messages: list[dict[str, Any]] = opening_messages(message, history)
 
         async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_S) as http:
             for step in range(settings.MAX_STEPS):

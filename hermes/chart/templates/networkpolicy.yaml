@@ -1,0 +1,31 @@
+# Sandbox pods deny ingress by default except the gateway's own exec tunnel
+# (port 2222). app.kubernetes.io/name=hermes-sandbox is stamped onto each
+# pod by provision-hermes-sandbox.sh (the Sandbox CR's own labels aren't on the Pod).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hermes-openshell-sandbox-ingress
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "hermes-openshell.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: hermes-sandbox
+  policyTypes:
+    - Ingress
+  ingress:
+    # Gateway's own exec/SSH tunnel.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: openshell
+      ports:
+        - port: 2222
+          protocol: TCP
+    # Chat adapter — reachable from wherever the UI's AGENT_URL traffic comes from.
+    - from:
+        - {{ toYaml .Values.networkPolicy.adapterSource | nindent 12 }}
+      ports:
+        - port: {{ .Values.adapter.port }}
+          protocol: TCP

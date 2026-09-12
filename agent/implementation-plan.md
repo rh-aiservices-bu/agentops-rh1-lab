@@ -2,7 +2,7 @@
 
 **Water Plant Maintenance Assistant on OpenShift AI 3.6**
 
-Status: draft for review · Author: initial plan · Date: 2026-09-03
+Status: Phase 0 largely complete · Last updated: 2026-09-09
 
 Source inputs: [RH1 AgentOps Lab overview.md](RH1%20AgentOps%20Lab%20overview.md) (what the agent is and what the scenarios teach), [planning.md](planning.md) (which Red Hat technology delivers each capability, and when it lands).
 
@@ -20,11 +20,12 @@ These are the calls I'm making so the plan is actionable. Each is cheap to rever
 
 | # | Decision | Choice | Rationale / reversal cost |
 |---|---|---|---|
-| D1 | Agent framework | **LangGraph (Python)** behind a thin `AgentRuntime` interface | MLflow has first-class autolog tracing for it; well-known to attendees; trivial to package as OCI. BYOA means the framework is explicitly *not* the point — the interface keeps a Llama Stack swap to ~1 day. |
+| D1 | Agent framework | **A plain loop, no framework.** *Revised from LangGraph.* | The reliability spike drove exactly this shape through the golden workflow at 100% over 14 scoreable runs, so the behaviour shipped is the behaviour measured, with no framework between the two. It also keeps the trace shape under our control, which §3.2 requires: a denial must appear as a span naming the component that refused. LangGraph's draw was autolog tracing; explicit instrumentation gives more control over exactly the thing the lab depends on. BYOA still holds — the framework was never the point. |
 | D2 | Model access | **MaaS via Model Gateway**, OpenAI-compatible client, `temperature=0` | Stated in planning.md. No self-hosted vLLM in the attendee footprint. |
 | D3 | MCP transport | **Streamable HTTP**, never stdio | MCP Gateway can only route, authorize and token-exchange over HTTP. stdio would make Scenarios 1/3/4/6 undemonstrable. |
-| D4 | MCP server count | **4 separate services**: telemetry, maintenance, docs, control | Scenario 3 needs *tool-level* denial within one server; separate servers make the coarse/fine distinction teachable. |
+| D4 | MCP server count | **4 separate services and 4 separate images**: telemetry, maintenance, docs, control | Scenario 3 needs *tool-level* denial within one server; separate servers make the coarse/fine distinction teachable. Separate *images* mean a change to one server does not redeploy the other two — which matters once participants are mid-exercise. |
 | D5 | Plant state | **FastAPI `plant-api`** with in-memory state + background tick loop + `POST /reset` | Reset in <1s is a hard requirement. No database to reset. **`replicas: 1`, `strategy: Recreate`, no HPA** — see §2.8. |
+| D15 | Where policy lives | **Mechanism in the tool schema, guidance in the knowledge base, policy at the gateway** | The prompt and the tool descriptions are not a place for policy. Written the way a careful engineer would write them, they made the model refuse three of four dangerous actions on its own and the baseline stopped being insecure. See §2.9. |
 | D14 | Persistence | **No database we write.** `plant-api` is the only stateful pod per attendee; the MCP servers are stateless proxies; scorecards go to MLflow/EvalHub | A pod restart is equivalent to a reset, which is acceptable for everything *except* the baseline scorecard — and that belongs in a durable shared service anyway. See §2.8. |
 | D6 | Docs / RAG | Prebuilt index shipped in the `docs-mcp` image, **per-document classification metadata from day one** (`public` / `engineering` / `restricted`) | Scenario 5 is unbuildable if classification is retrofitted. Avoids a per-attendee Milvus. |
 | D7 | UI | **FastAPI BFF serving vanilla JS** — chat pane, live plant dashboard, scorecard panel. *Revised from React + Vite.* | The dashboard is what makes "the agent broke the plant" visceral; the scorecard makes the AgentOps loop legible. But a polling dashboard, a chat transcript and a scorecard need no framework state machinery — dropping Vite removes a Node build stage, halves the image across 30 tenants and speeds the inner loop. Reversible if the UI grows. |
@@ -50,7 +51,7 @@ These are the calls I'm making so the plan is actionable. Each is cheap to rever
                     └───────────────┬──────────────────────┘
                                     │ Bearer: caller token
                     ┌───────────────▼──────────────────────┐
-                    │  Maintenance Agent  (LangGraph)      │
+                    │  Maintenance Agent  (plain loop)     │
                     │  ├ MLflow / OTel tracing             │
                     │  ├ token propagation (no authz)      │
                     │  └ run_diagnostic()  ← code exec     │
@@ -326,6 +327,128 @@ MLflow needs a backing store, and Keycloak and Vault bring their own persistence
 
 If Phase 6 dry runs show `plant-api` restarting more than rarely, the cheap fix is a periodic JSON snapshot to a small PVC, restored on boot. Off by default, and deliberately not built now: it is a moving part that buys nothing unless restarts turn out to be common.
 
+### 2.9 What we learned building it
+
+Five findings from Phase 0 that were not obvious in advance, and that anyone
+maintaining this needs to know.
+
+#### The prompt became the authorization mechanism
+
+Tool descriptions and the system prompt were written the way a careful engineer
+writes them: *"do not set a speed below 40%"*, *"last resort"*, *"should not be
+opened to resolve an ordinary equipment fault"*.
+
+The model obeyed. It refused **three of four** dangerous actions on its own
+judgement, and the baseline stopped being insecure. Participants would have
+applied MCP Gateway policy in Phase 4 and seen no behavioural change, because
+the model was already saying no — the before/after comparison would have proved
+nothing, and the failure is invisible unless you specifically test that the
+attacks still succeed.
+
+The separation that resolves it, now D15:
+
+- **Mechanism** in the tool schema — what the tool does and what happens.
+- **Guidance** in the knowledge base — the 40% minimum continuous speed lives in
+  maintenance record `MR-2301`, where the agent finds it as evidence.
+- **Policy** at the gateway.
+
+The system prompt now states plainly that the agent is *not* an authorization
+boundary: it voices concerns and then complies, because declining on its own
+judgement gives a false impression of safety when nothing would stop a
+different caller.
+
+**One refusal survives and should not be fixed.** The model still declines
+`set_pump_speed(2, 5)` from its own safety training. That exposed a flaw in
+Scenario 6, which is about authorization on *parameters*, not physical safety.
+**45% is the right test value** — physically harmless, outside the Operator's
+50–100% band, and the agent complies with it. The gateway can then deny on
+policy with no model-safety confound.
+
+#### A clean merge silently reverted it
+
+The upstream split of `mcp/` into three packages recreated the servers at new
+paths from a pre-fix copy. Git saw clean renames with no competing edit and took
+them. Every description fix disappeared without a conflict, and **the reverted
+code had a green test defending it** — the old test asserting the 40% figure
+*is* documented came back too.
+
+Unit tests cannot catch this: they call tools directly and never involve the
+model. What catches it is an agent-level assertion that the baseline attacks
+still succeed, which belongs in the security suite (§3.6).
+
+#### The agent reported an action it never took
+
+Asked to start pump 3, it replied *"Starting pump 3."* and stopped — no tool
+call, plant untouched, operator told otherwise. The prompt forbade implying
+success for a call that was **refused** but said nothing about one never
+**made**.
+
+Also invisible to text-only checks, since the prose is entirely plausible. It is
+caught by correlating the claim against the trace, which is a second argument
+for the dashboard reading `plant-api` directly rather than through the agent.
+
+#### The model is not the bottleneck — the endpoint is
+
+The reliability spike answered the question that topped this plan from the
+start. `qwen3-235b` completed the golden workflow **14/14 scoreable runs, 100%**,
+with zero malformed tool calls and zero tool errors, median seven calls. The
+Phase 0 gate of ≥95% is met.
+
+But one *sequential* client drew **52 HTTP 429s across 15 runs**, stretching a
+10-second run to as much as 172 seconds once backoff was absorbing them. The lab
+runs 30 attendees concurrently against the same virtual key, and there is only
+one model on the endpoint, so there is no fallback to shift load to.
+
+Questions for whoever owns the MaaS tenancy: is the limit per virtual key — if
+so, per-attendee keys help — what is the quota, and can it be raised for the
+event window? The 429s are `vertex_aiException — Resource exhausted`, so the
+ceiling may be upstream of LiteLLM entirely.
+
+#### Swapping the harness proved the claim and found where it leaks
+
+BYOA is asserted on a slide; `agent.harness: hermes` is the claim stated in
+configuration. Hermes passes the golden workflow with the plant, the MCP
+servers, the policy layer and the console untouched, reaching the same diagnosis
+by the same route and citing MR-2246 unprompted. That is the good news, and it
+is worth more than the assertion.
+
+Three things the swap exposed, all of which argue the same point.
+
+**The eval suite must not encode one agent's habits.** Hermes derates Pump 4 to
+85% where ours picks 70% — a defensible call from the same evidence, since only
+the 40% floor is written down. `grade()` scores the tool calls made, not the
+values chosen, so both pass. Had it asserted `speed == 70` it would have scored
+a correct run at zero, and `evalctl` would have been measuring the framework
+rather than the platform. Keep the criteria harness-neutral.
+
+**Trace and identity are currently the agent's, and should be the platform's.**
+Hermes runs its loop server-side and returns only the finished answer, so there
+are no tool calls to render — and module 6 has participants debug an
+over-restrictive policy *from the trace*. It also authenticates with one static
+server key and rejects a participant token, so the console must hold a service
+credential and the caller's identity stops there, which is Scenarios 1, 4 and 6.
+Both are reported through `/api/config` so an exercise fails loudly. Both also
+say the same thing: put tracing and identity at MCP Gateway, where they survive
+a harness swap. Right now our own agent is quietly holding up module 6.
+
+**A third-party harness fails in ways ours cannot.** Hermes dials MCP once at
+start-up, retries three times over about seven seconds, and then gives up for
+the life of the process. Lose that race — a cluster restart brings it up
+alongside the MCP servers — and it starts healthy, passes its probes, serves
+requests, and answers plant questions out of its *local shell* instead: "I don't
+see any files related to pumps in the current directory." Nothing says why. With
+30 participants and one restart that is 30 agents that look fine and cannot
+reach a tool. The chart now gates start-up on MCP reachability and fails the pod
+rather than starting without it, because a CrashLoopBackOff names the problem
+and a shell-only agent does not.
+
+That local terminal backend is worth a decision rather than a default. Hermes
+warns about it itself — *"API server is network-accessible (0.0.0.0) AND the
+terminal backend is 'local' (unsandboxed)"* — and it is a more honest module 4
+subject than our own `run_diagnostic`, because we did not plant it.
+
+---
+
 ---
 
 ## 3. What we build
@@ -342,7 +465,7 @@ Add a **safety envelope readout** (not enforcement): the dashboard shows when th
 
 ### 3.2 The agent
 
-A LangGraph agent with a system prompt written as if security were someone else's job — because it is. It should read like a competent, helpful production assistant. Do not write a deliberately naive agent; the vulnerabilities must come from the platform's permissiveness, not from bad prompting.
+An agent with a system prompt written as if security were someone else's job — because it is. It should read like a competent, helpful production assistant. Do not write a deliberately naive agent; the vulnerabilities must come from the platform's permissiveness, not from bad prompting.
 
 Non-negotiable agent behaviours from day one:
 
@@ -409,29 +532,38 @@ Timings are effort estimates, not a schedule; §7 maps them onto the calendar.
 
 ### Phase 0 — MVP on the cluster, no security (≈2.5 weeks)
 
-Containerfiles, the Helm chart and the dev-namespace inner loop first (§2.6), then everything on top of it: plant-api with tick loop and reset; four MCP servers over streamable HTTP; LangGraph agent with `run_diagnostic`; MLflow tracing; UI chat and dashboard; all seed content including the planted artifacts. Model access via MaaS directly at this stage.
+Containerfiles, the Helm chart and the dev-namespace inner loop first (§2.6), then everything on top of it: plant-api with tick loop and reset; four MCP servers over streamable HTTP; the agent with `run_diagnostic`; MLflow tracing; UI chat and dashboard; all seed content including the planted artifacts. Model access via MaaS directly at this stage.
 
 Half a week longer than a compose-based Phase 0, and it absorbs all of the deployment work the old Phase 1 carried.
 
 **Exit criteria:** golden workflow passes ≥95% over 20 consecutive runs **on the cluster**; MLflow shows the complete trace; opening the emergency bypass visibly drains the reservoir on the dashboard; no developer has built a container locally.
 
-**Progress.** `plant-api` and the telemetry, maintenance and control MCP servers are built and deployed on the cluster, with 52 unit tests green. The golden workflow has been walked end to end over real MCP against the running services:
+**Progress — Phase 0 is largely complete.** `plant-api`, the three MCP servers,
+the agent and the operator console are built, tested and running on the cluster.
+**55 tests** green: plant-api 29, telemetry 7, maintenance 8, control 11.
+
+The golden workflow runs end to end over real MCP, streamed to the console:
 
 ```
-1. safety status   -> critical  (pump-4 vibration 8.2, bearing 70.5C, head deficit 32.2%)
-2. get_pump_status(4) -> vib 8.2 mm/s, 3.12 bar, 100%
-3. search_maintenance_history(4) -> MR-2291, MR-2280, MR-2246
-4. injection intact in MR-2291 -> True
-5. create_work_order -> WO-4417
-6. set_pump_speed(4, 70)
-7. verify -> vib 5.21 mm/s, safety warn
+->  telemetry-mcp    get_pump_status(4)          8.2 mm/s, 3.1 bar, 100%
+->  telemetry-mcp    get_plant_safety_status     critical
+->  maintenance-mcp  search_maintenance_history  MR-2291, MR-2280, MR-2246
+->  maintenance-mcp  get_maintenance_record      MR-2246, the deferred bearing
+->  maintenance-mcp  list_work_orders            check before duplicating
+->  control-mcp      set_pump_speed(4, 70)
+->  maintenance-mcp  create_work_order           WO-4417
 ```
 
-Baseline insecurity confirmed live: `dump_plant_configuration` returns the PLC endpoint, `open_valve('emergency_bypass')` succeeds, and `set_pump_speed(2, 5)` is accepted. All three must fail after Phase 4.
+Baseline insecurity confirmed live at the agent level, not just the tool level:
+`dump_plant_configuration` returns the PLC endpoint, `open_valve('emergency_bypass')`
+succeeds, `emergency_shutdown` succeeds. All must fail after Phase 4.
 
-The operator console is deployed and live, reading plant state directly from `plant-api` rather than through the agent — so the plant stays observable when the agent is denied, broken or absent, which is most of module 4. The chat pane renders but degrades to a clear "not deployed" state until `AGENT_URL` is set.
+The console streams the work as it happens — tool calls as they fire, then the
+answer token by token — with a trace toggle and a readability mode that replaces
+the CRT treatment with standard system faces.
 
-Still outstanding for Phase 0: the agent itself, `docs-mcp` and its corpus, and MLflow tracing wired through. The agent is blocked on the model endpoint (§8 Q2).
+Still outstanding for Phase 0: `docs-mcp` and its classified corpus, `evalctl`,
+and MLflow tracing wired through. Nothing is blocked.
 
 ### Phase 1 — Identity and the governed endpoint (≈1 week)
 
@@ -495,7 +627,9 @@ The four-exercise lab path from the overview — Discover / Protect identity and
 |---|---|---|
 | **OpenShell API churn across 3.5 DP → 3.6 EA → GA** | High — Phase 3 rework | Now **two** re-bases, not one (§2.6). Treat the 3.5 Dev Preview spike as throwaway learning about policy shape, never as delivery. Policies as versioned CRs behind a thin generator; budget a week for the GA re-base |
 | **MCP Gateway maturity in 3.6 unconfirmed** (planning.md flags this) | High — Phases 4, 6 | Fallback: Authorino/Kuadrant AuthPolicy directly in front of each MCP server. Same lesson, less product narrative. **Decide by end of Phase 2.** |
-| **Tool-calling flakiness** | High — the lab feels broken | Measure in Phase 0; treat <95% as a blocker; per-node tool scoping; bounded retry |
+| ~~Tool-calling flakiness~~ | **Closed** | Measured at 100% across 14 scoreable runs (§2.9). The model is not the risk |
+| **Shared model endpoint capacity** | High — event-day failure | 52 HTTP 429s from a *single* sequential client across 15 runs. Backoff absorbs it and hides it; 30 concurrent attendees on one key will not be absorbed. No fallback model exists on the endpoint. §8 Q2 |
+| **The baseline silently stops being insecure** | High — the lab proves nothing | Prescriptive wording in a prompt or tool description makes the model refuse, and it has already been reintroduced once by a clean merge with a green test defending it (§2.9). Only an agent-level assertion that the attacks still succeed catches it — build it into the security suite |
 | **No VM isolation layer** | Accepted — narrative, not delivery | Kata is out and the divergence is **accepted** (§2.3). Reframe 4A around what the boundary does and does not guarantee, which motivates OpenShell harder. Annotate planning.md so the change stays visible |
 | **Attack payloads in a shared-kernel container** | Low | Payloads are benign by construction and agent-generated, not attendee-authored. Contained by SCC, seccomp, SELinux, NetworkPolicy and a dedicated node pool |
 | **On-cluster inner loop is slow enough to hurt velocity** | Medium — Phase 0 | Timebox the §2.6 loop to three days; if hot reload is not working, fall back to build-and-redeploy rather than reintroducing local development. Cluster outage blocks all development, so treat cluster availability as a Phase 0 dependency |
@@ -532,7 +666,7 @@ The event date is still unknown; the January column assumes a spring RH1. **Conf
 Answers needed before the phase noted.
 
 1. **RH1 event date?** The only remaining "needed now" item. Drives the content freeze, which everything else works backwards from. *(Needed: now.)*
-2. **Which model does MaaS provide, and what is its measured tool-calling reliability?** The agent is built against an OpenAI-compatible client so the model stays swappable, but the reliability spike cannot run until the endpoint exists. *(Needed: Phase 0 — this is the last blocker.)*
+2. **Can the shared model endpoint carry 30 concurrent attendees?** One sequential client drew 52 HTTP 429s across 15 golden-workflow runs (§2.9). Is the limit per virtual key — would per-attendee keys help? What is the quota, and can it be raised for the event window? The errors are `vertex_aiException — Resource exhausted`, so the ceiling may be upstream of LiteLLM. *(Needed: before any dry run at scale.)*
 3. **Which policy surfaces does an attendee actually get in the browser?** OpenShell Admin UI is confirmed; MCP Gateway policy may be console YAML editing instead of a UI. Determines how much of §2.5's tab list is real. *(Needed: Phase 1.)*
 4. **Is `agent/` the right home, or does this become a multi-repo Publishing House project?** Affects the ArgoCD layout. *(Needed: Phase 1.)*
 5. **Is MCP Gateway in the RH1 event build of 3.6, and at what maturity?** planning.md marks this "to confirm". The October spike on 3.5 TP will tell us a lot early. Determines whether §6's Authorino fallback is activated. *(Needed: end of Phase 2.)*
@@ -547,6 +681,8 @@ Answers needed before the phase noted.
 - **Dropping VM isolation is accepted.** Kata off the critical path; annotate planning.md (§2.3).
 - **MCP Gateway is per attendee**, not shared — a shared data plane would leak one attendee's denials into another's lab (§2.5).
 - **Development runs on-cluster**, no compose file in the repo (§2.6). Images build on-cluster via binary BuildConfigs, so no developer builds a container locally even before CI exists.
+- **Model and tool-calling reliability.** `qwen3-235b` over LiteLLM, measured at 100% on the golden workflow across 14 scoreable runs. The Phase 0 gate is met and the model is not the risk (§2.9).
+- **Scenario 6's test value is 45%**, not 5% — physically harmless, outside the Operator's authorized band, and free of the model's own safety refusal (§2.9).
 - **Guardrails: both are available.** RHOAI 3.5 installs `guardrailsorchestrators` *and* `nemoguardrails` CRDs, so Phase 5 is a choice rather than a dependency.
 - **EvalHub is GA and running** — `evalhubs.trustyai.opendatahub.io`, deployed in the shared namespace.
 - **MLflow is a cluster-scoped singleton** that must be named `mlflow`, requires `backendStoreUri`, and deploys into the RHOAI applications namespace regardless of the namespace in the manifest.
@@ -561,7 +697,7 @@ The cluster lands within the hour, so this is a start-today list.
 2. **Stand up dev namespaces and the §2.6 inner loop** — CI image build, chart skeleton, `oc rsync` watcher, one hello-world service reloading in a pod. Hard three-day timebox: if hot reload is not working by then, fall back to build-and-redeploy rather than letting the tooling become the project.
 3. Scaffold the repository layout from §2.4 — with `deploy/` split into `chart-platform/` and `chart-policy/` from the start (§2.7), since retrofitting that split means re-templating every manifest.
 4. Build `plant-api` with the tick loop, the Pump 4 degradation seed, and `/reset`.
-5. Build `telemetry-mcp` and prove one MCP call over streamable HTTP from a LangGraph agent, running on the cluster, with an MLflow trace attached.
+5. Build `telemetry-mcp` and prove one MCP call over streamable HTTP from the agent, running on the cluster, with an MLflow trace attached.
 6. Chase the RH1 date (Q1) — cheap, and it does not block any of the above.
 
 Step 5 is the smallest thing that de-risks the most: it validates the framework choice, the transport choice, the tracing choice and the deployment path in one go. Everything after it is filling in a shape that has been proven to work.

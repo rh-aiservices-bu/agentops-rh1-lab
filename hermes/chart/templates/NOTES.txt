@@ -1,0 +1,15 @@
+hermes-openshell gateway installed in {{ .Values.namespace }}.
+
+Next steps:
+  1. Confirm the gateway is up:
+       oc get statefulset openshell -n {{ .Values.namespace }}
+  2. Provision a participant's Hermes sandbox (creates the sandbox, uploads
+     config/policy/adapter, starts the chat adapter):
+       ./deploy/scripts/add-participant.sh <name>
+  3. Point the UI at it for a live demo:
+       oc set env deployment/waterplant-ui -n {{ .Values.namespace }} \
+         AGENT_URL=http://hermes-<name>.{{ .Values.namespace }}.svc:{{ .Values.adapter.port }}
+
+Reminder: llm.apiKeySecretRef.name ({{ .Values.llm.apiKeySecretRef.name | default "NOT SET" }})
+must name an existing Secret with key {{ .Values.llm.apiKeySecretRef.key }} —
+this chart never creates or stores that key itself.

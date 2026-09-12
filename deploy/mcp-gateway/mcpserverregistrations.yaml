@@ -1,0 +1,70 @@
+# MCPServerRegistrations that federate the three wp-dev MCP servers into the
+# MCP Gateway broker.
+#
+# Each registration references an HTTPRoute and assigns a tool prefix so that
+# tools from different servers cannot collide in the aggregated tool list.
+#
+# ── x-mcp-servername and Keycloak client IDs ────────────────────────────────
+# The MCP Gateway broker injects an x-mcp-servername header on every tool call.
+# The authz CEL policy checks:
+#   resource_access[x-mcp-servername].roles contains "tool:<toolname>"
+# so the Keycloak client ID in each participant realm MUST match exactly what
+# the gateway sets.
+#
+# The naming convention observed on this cluster is:
+#   x-mcp-servername = <namespace>/<registration-name>
+# giving:  wp-dev/telemetry-mcp, wp-dev/maintenance-mcp, wp-dev/control-mcp
+#
+# These match the client IDs in deploy/keycloak/realms/waterplant-realm-template.yaml.
+# If a tool call returns 403 with "Insufficient permissions" even for a granted
+# tool, verify the actual x-mcp-servername value by inspecting Authorino logs:
+#   oc logs -n mcp-gateway -l app=authorino --tail=50 | grep x-mcp-servername
+# and adjust client IDs in the realm template + participant realms accordingly.
+---
+apiVersion: mcp.kuadrant.io/v1alpha1
+kind: MCPServerRegistration
+metadata:
+  name: telemetry-mcp
+  namespace: wp-dev
+spec:
+  prefix: telemetry_
+  hint: "Read-only plant telemetry: pump status, safety status, water quality, reservoir level, valve positions."
+  category:
+    - telemetry
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: telemetry-mcp-route
+    namespace: wp-dev
+---
+apiVersion: mcp.kuadrant.io/v1alpha1
+kind: MCPServerRegistration
+metadata:
+  name: maintenance-mcp
+  namespace: wp-dev
+spec:
+  prefix: maintenance_
+  hint: "Maintenance history, work orders: search records, get details, list/create/update work orders."
+  category:
+    - maintenance
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: maintenance-mcp-route
+    namespace: wp-dev
+---
+apiVersion: mcp.kuadrant.io/v1alpha1
+kind: MCPServerRegistration
+metadata:
+  name: control-mcp
+  namespace: wp-dev
+spec:
+  prefix: control_
+  hint: "Plant control: set pump speed, start/stop pumps, open/close valves, emergency shutdown."
+  category:
+    - control
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: control-mcp-route
+    namespace: wp-dev
