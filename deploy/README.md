@@ -224,17 +224,14 @@ https://<keycloak-host>/admin/waterplant-<name>/console
 A second AI agent for the lab, alongside `agent/`: Hermes, run inside an
 [OpenShell](https://github.com/nvidia/openshell) sandbox. It runs
 `hermes gateway run` with its built-in OpenAI-compatible `api_server`
-platform, which `ui/src/waterplant_ui/harness.py`'s `AGENT_PROTOCOL=openai`
-path talks to directly — see [`hermes/README.md`](../hermes/README.md) for
-the full design, including a known, deliberate tradeoff this build accepts:
-Hermes's own LLM/MCP/web calls run in the sandbox pod's default network
-namespace (so the Service can reach the api_server at all), not through
-`openshell sandbox exec`'s policy-enforced one — network-policy enforcement
-is not currently in effect for this path. An earlier, retired design
-(`hermes-tmp/`) drove per-turn `hermes -z` oneshot calls through
-`openshell sandbox exec` instead, which did keep network calls
-policy-enforced but couldn't reuse Hermes's own streaming/session/API-server
-features — see `hermes-tmp/README.md` if reviving that tradeoff is ever worth it.
+platform via `openshell sandbox exec`, reachable through OpenShell's own
+gateway service-relay (not a plain Kubernetes Service) — see
+[`hermes/README.md`](../hermes/README.md) for the full design. Both real
+Landlock policy enforcement *and* reachability hold at the same time (a
+filesystem write outside the sandbox's allowlist fails, a request to a
+non-allowlisted host is blocked, and the console can still reach it) —
+`hermes-tmp/` holds an earlier, retired design that only got the
+enforcement half, kept for reference.
 
 This step is optional and independent of Steps 1–6 — skip it if you only need
 the core telemetry/maintenance/control lab.
@@ -273,10 +270,14 @@ lists) — pass overrides with `-f my-overrides.yaml` or `--set`.
 
 Already wired into `add-participant.sh` — if the chart above is installed
 before you run it, each participant automatically gets their own Hermes
-sandbox, Keycloak `wp-dev/hermes-agent` client (full tool access — see
-`hermes/README.md`), and Service. Re-run `add-participant.sh <name>` for a
-participant created before you installed the chart to provision Hermes for
-them retroactively.
+sandbox, MLflow experiment (named after the participant, auto-created —
+see `hermes/README.md`), and gateway service-relay endpoint. Hermes's own
+MCP calls authenticate as the realm's `operator` user, capped at the
+operator persona's own tool scope (see `hermes/README.md`'s "Hermes's MCP
+identity" section) — not the full-access `wp-dev/hermes-agent` service
+account that client role grant might suggest. Re-run `add-participant.sh
+<name>` for a participant created before you installed the chart to
+provision Hermes for them retroactively.
 
 ### 7d. Point the UI at one participant's Hermes
 
@@ -485,15 +486,14 @@ streaming/session features) is preserved at `hermes-tmp/`.
   ```
   and update the client IDs in `waterplant-realm-template.yaml` and any existing
   participant realms accordingly.
-- **Hermes (Step 7) network-policy enforcement is a known, accepted gap in this
-  build** — `hermes gateway run` runs in the sandbox pod's default network
-  namespace (required for the Service to reach it at all), not through
-  `openshell sandbox exec`'s policy-enforced one, so its own LLM/MCP/web calls
-  are not currently subject to `openshellPolicy`'s network allowlist. See
-  `hermes/README.md` and this repo's plan history for the full
-  reachability-vs-enforcement tradeoff and the retired alternative
-  (`hermes-tmp/`) that kept enforcement at the cost of Hermes's native
-  streaming/session features.
 - **Hermes is per-participant but the UI is single-tenant** — `waterplant-ui`
   has one `AGENT_URL`; only one participant's Hermes can be the live chat
   backend at a time. See Step 7d.
+- **`add-participant.sh` step 8 (realm-admin user creation) will warn and
+  skip rather than fail outright if Keycloak's bootstrap
+  `keycloak-initial-admin` temp-admin credentials have expired** (a normal
+  RHBK/Keycloak Operator behavior after enough time or a permanent admin
+  exists) — confirmed live: the admin API call returns 403. Step 9 (Hermes
+  provisioning) still runs either way; only the per-realm `<name>-admin`
+  login won't exist until this is addressed some other way (a permanent
+  Keycloak admin, not just re-extending the temp one).

@@ -22,13 +22,13 @@ self-contained in `wp-dev` and reproducible from this repo alone.
 this repo's `deploy/apps/kustomization.yaml` (unlike `plant-api`, the MCP
 servers, and `waterplant-ui`, which all have BuildConfigs). The image is
 built and pushed manually — check `hermes/chart/values.yaml`'s `image.*` for
-what's actually deployed, it will drift as the image gets rebuilt (currently
-`quay.io/rlundber/agentops-rh1-hermes:0.2`) — and everything this deployment
-adds on top (MCP wiring, trimmed config, sandbox policy) is injected at
-runtime onto the sandbox's filesystem, not baked into the image. Rebuild only
-if you need to bump a baked-in dependency, or when you change
-`hermes-agent`'s own source (see the `_check_auth` patch below — that's the
-current reason `0.2` exists).
+what's actually deployed, it will drift as the image gets rebuilt — and
+everything this deployment adds on top (MCP wiring, trimmed config, sandbox
+policy, the `hermes_otel` plugin) is injected at runtime onto the sandbox's
+filesystem, not baked into the image. Rebuild only if you need to bump a
+baked-in dependency, or when you change `hermes-agent`'s own source — see
+the `_check_auth` and `mcp_tool.py` patches below, both of which require a
+rebuild+push to take effect.
 
 ## Architecture: real Landlock enforcement AND real reachability, via the gateway's service relay
 
@@ -89,22 +89,23 @@ Two non-obvious bugs, both confirmed via source reading + live testing
    between the two systems.
 
    **Fix: a patch to the `hermes-agent` fork itself**
-   (`cai-krew/hermes-agent/gateway/platforms/api_server.py`, `_check_auth`,
-   ~line 970): if no `Authorization` header is present *and* the TCP peer
-   (`request.remote` — the real transport-level source address, not a
-   spoofable header) is loopback (`127.0.0.1`/`::1`), auth passes — trusting
-   that the gateway's mTLS layer already authenticated the caller before the
-   relay ever reached this process. A non-loopback peer still always
-   requires the bearer token, unchanged. This is what's baked into image
-   `0.2`.
+   (`cai-krew/hermes-agent/gateway/platforms/api_server.py`, `_check_auth`):
+   if no `Authorization` header is present, the TCP peer (`request.remote` —
+   the real transport-level source address, not a spoofable header) is
+   loopback (`127.0.0.1`/`::1`), *and* `self._skip_auth` is true, auth
+   passes — trusting that the gateway's mTLS layer already authenticated
+   the caller before the relay ever reached this process. A non-loopback
+   peer still always requires the bearer token, unchanged.
 
-   **Pending follow-up, not yet done:** gate this bypass on an explicit
-   `skip_auth` value read from Hermes's own config, not just
-   "no-header-and-loopback" unconditionally. Requested by the user, queued
-   for whoever picks this up next — see the git history / ask if unclear,
-   the reasoning is: unconditional loopback-trust is fine for this lab but a
-   config-gated version is the more defensible default to leave in a fork
-   others might reuse.
+   `self._skip_auth` is config-gated, not unconditional (a later refinement
+   over the first version of this patch): it reads
+   `platforms.api_server.extra.skip_auth` from `config.yaml`, defaulting to
+   off, so a plain deployment of this fork stays exactly as secure as before
+   this patch existed. Wired on for this deployment in
+   `hermes/chart/templates/configmap-scripts.yaml`'s
+   `hermes-config.yaml.template` (needs the `extra:` nesting specifically —
+   a plain top-level `platforms.api_server.skip_auth` is silently ignored,
+   see the comment there for why).
 
 A single `mcp-token-refresh.py` (stdlib-only Python, no pip installs needed
 at runtime) keeps Hermes's MCP Gateway OAuth token fresh, run as a
@@ -173,6 +174,89 @@ mechanics are correct end-to-end. If real token-by-token streaming is
 wanted, that's a change to `hermes-agent`'s own agent loop (where it decides
 when to call `stream_delta_callback`), not anything in this repo.
 
+### MCP tool-call timeout: a rejected/broken call used to hang for 300s
+
+Calling an MCP tool that the gateway rejects (e.g. insufficient role) or a
+genuinely broken tool on the shared MCP Gateway used to hang for the full
+300s default timeout before failing — even though the gateway itself
+rejects almost instantly. Root cause, confirmed by reading both the
+`hermes-agent` source and the installed `mcp` SDK: the pending tool call's
+future is scheduled independently of the transport's own task group
+(`tools/mcp_tool.py`'s `_run_on_mcp_loop`, via
+`asyncio.run_coroutine_threadsafe`), and the SDK's own per-request timeout
+(`ClientSession`'s `read_timeout_seconds`) was never being set — so nothing
+bounded the wait except Hermes's blunt outer watchdog.
+
+Two-part fix, config value first with a real code fix behind it:
+- `mcp_servers.<name>.timeout` in `config.yaml` (a real, already-documented
+  knob) is set to `hermes/chart/values.yaml`'s new
+  `mcp.toolTimeoutSeconds: 30` — caps the worst case at 30s instead of 300s
+  on its own, no code change needed.
+- `cai-krew/hermes-agent/tools/mcp_tool.py` now passes
+  `read_timeout_seconds=timedelta(seconds=5)` into every `ClientSession(...)`
+  construction, so the SDK's own `anyio.fail_after()` fires cleanly on its
+  own with a proper `McpError` instead of relying on the blunt 30s cap.
+  Deliberately set well below the 30s outer timeout — if the two are equal,
+  the outer watchdog's synchronous poll wins the race almost every time
+  and the SDK's cleaner error never actually surfaces (confirmed live: this
+  is exactly what happened when both were first set to the same value).
+  Requires a rebuild+push to take effect, like `_check_auth` above.
+
+### Hermes's MCP identity: the realm's `operator`, not `wp-dev/hermes-agent`
+
+Hermes's own MCP calls authenticate as the realm's `operator` user
+(password grant via the public `mcp-gateway` client), not the
+`wp-dev/hermes-agent` service-account client. `wp-dev/hermes-agent`'s
+Keycloak role grant still mirrors full tool access (deliberately, from an
+earlier decision), but using it here meant every chat through the UI could
+trigger any tool — including `dump_plant_configuration`,
+`emergency_shutdown` — regardless of which persona was selected in the UI,
+since identity never reaches Hermes on this path anyway (see "no per-user
+attribution" below). Using the operator's own credentials caps Hermes at
+exactly the operator persona's tool scope instead — not real per-user
+identity propagation, just a lower default ceiling. Wired in
+`deploy/scripts/add-participant.sh`'s `hermes-mcp-auth-<name>` Secret
+(`MCP_CLIENT_ID=mcp-gateway`, `MCP_USERNAME=operator`,
+`MCP_PASSWORD=operator`) and `mcp-token-refresh.py` (password grant, not
+client_credentials).
+
+### MLflow tracing (one experiment per participant)
+
+Hermes sends real OTLP traces to RHOAI's shared MLflow instance
+(`https://rh-ai.apps.caiprod.rhoai.rh-aiservices-bu.com/mlflow`), via the
+[`hermes_otel`](https://github.com/briancaffey/hermes-otel) plugin — a
+GitHub-hosted plugin, not a pip package. The experiment is named after the
+participant (`${NAME}`) and auto-created if missing (confirmed live:
+`demo` → experiment 3, `alice` → experiment 4).
+
+Installed **per-sandbox at provision time** (not baked into the image, even
+though `hermes_cli.plugins.get_bundled_plugins_dir()` would allow that —
+deliberately following the pattern both reference implementations in
+`cai-krew/hermes-container` use, rather than a theoretically-cleaner
+image-bake rework). `deploy/scripts/provision-hermes-sandbox.sh`
+downloads the plugin's GitHub tarball via `curl`+`tar` (the setup Job's own
+container, `quay.io/openshift/origin-cli:latest`, has neither `git` nor
+`microdnf` — confirmed live) and extracts *only* its `hermes_otel/`
+subdirectory directly (`--strip-components=2` from
+`hermes-otel-main/hermes_otel/...`) — both upstream references' own
+extraction scripts get this wrong (verified by downloading the actual
+tarball: `plugin.yaml` is nested one level inside the package's own
+`hermes_otel/` subdirectory, but their `--strip-components=1` only strips
+the outer GitHub wrapper, which would double-nest the plugin if run today).
+
+Auth: an `hermes-openshell-installer` ServiceAccount token (minted fresh
+per provision run, `oc create token ... --duration=8760h`), authorized via
+a `RoleBinding` (`hermes/chart/templates/rolebinding-mlflow.yaml`) to the
+cluster-wide `mlflow-operator-mlflow-integration` ClusterRole. Baked as a
+literal value into the plugin's own `config.yaml` at provision time — that
+file does no runtime env-var expansion, so `${MLFLOW_SA_TOKEN}` in the
+template is a `sed` placeholder, not something read live.
+`X-MLflow-Workspace: wp-dev` is a real, working per-namespace data scope,
+not decorative — confirmed live: a wp-dev-scoped search doesn't see
+`cai-crew`'s own experiments, and each new experiment's own
+`artifact_location` embeds the workspace path
+(`mlflow-artifacts:/workspaces/wp-dev/<id>`).
+
 ## Tooling gotcha: `helm` and `oc` can disagree about which cluster is live
 
 In this dev environment, `oc` is a WSL wrapper script that shells out to a
@@ -190,11 +274,11 @@ command fixes it. `oc` itself needs no such override.
   callers with a single static `API_SERVER_KEY` per participant (unused on
   the relay path specifically, see above) — the console's `ui/harness.py`
   explicitly reports this via `/api/config`'s `identityPropagated: false`
-  rather than silently missing it. Hermes's own MCP calls run as the fixed
-  `wp-dev/hermes-agent` Keycloak service identity (full tool access,
-  including `set_pump_speed`, `emergency_shutdown`,
-  `dump_plant_configuration`), so every chat through the UI can trigger any
-  tool regardless of who's asking.
+  rather than silently missing it. Hermes's own MCP calls now run as the
+  realm's fixed `operator` identity (see "Hermes's MCP identity" above) —
+  capped at the operator's own tool scope rather than full admin access,
+  but still one shared identity for every chat through the UI, not real
+  per-caller attribution.
 - **No tool-call trace.** Hermes's agent loop runs server-side inside
   `hermes gateway run`; only the finished answer crosses the wire, so the
   console's `agentTraceAvailable` reads `false` for this path.
@@ -220,6 +304,7 @@ command fixes it. `oc` itself needs no such override.
 | Env bootstrap (API keys, MCP creds, `API_SERVER_*`) | heredoc in `deploy/scripts/provision-hermes-sandbox.sh`, filled from the `hermes-mcp-auth-<name>` Secret + `provision.env` | rendered at provision time | `/sandbox/.sandbox-init.sh` (sourced before `hermes gateway run` starts) |
 | MCP OAuth token cache | written by `mcp-token-refresh.py` | — | `/sandbox/.hermes/mcp-tokens/gateway.json` (watched by Hermes's `MCPOAuthManager` via file mtime) |
 | Landlock policy (separate from Hermes's own app config) | `configmap-scripts.yaml`'s `policy-standard.yaml.template`, filled from `values.yaml`'s `openshellPolicy` | same ConfigMap | applied via `openshell policy set`, enforced by the sandbox supervisor — not a file Hermes itself reads |
+| `hermes_otel` plugin's own MLflow config | `configmap-scripts.yaml`'s `hermes-otel-config.yaml.template`, filled from `values.yaml`'s `mlflow.*` | same ConfigMap | `/sandbox/.hermes/plugins/hermes_otel/config.yaml` (a different path from the main `config.yaml` — the plugin's files themselves are also uploaded here, downloaded fresh per sandbox, see "MLflow tracing" above) |
 
 ## Layout
 
@@ -228,13 +313,15 @@ hermes/
 ├── Containerfile           # provenance only — see above, not built by this repo
 ├── README.md                # this file
 └── chart/                   # Helm chart — installs the shared OpenShell gateway.
-    ├── values.yaml            # LLM/MCP endpoints, image ref, openshell policy toggles, persona
+    ├── values.yaml            # LLM/MCP endpoints, image ref, openshell/mlflow policy toggles, persona
     ├── files/
     │   └── mcp-token-refresh.py  # source of truth for the in-sandbox token refresher
     └── templates/
-        └── configmap-scripts.yaml   # embeds files/*.py + renders hermes-config.yaml.template
-                                      # (model, mcp_servers, toolsets, platforms.api_server),
-                                      # SOUL.md, and policy-standard.yaml.template from values.yaml
+        ├── configmap-scripts.yaml   # embeds files/*.py + renders hermes-config.yaml.template
+        │                             # (model, mcp_servers, toolsets, platforms.api_server, plugins),
+        │                             # SOUL.md, hermes-otel-config.yaml.template, and
+        │                             # policy-standard.yaml.template from values.yaml
+        └── rolebinding-mlflow.yaml   # authorizes hermes-openshell-installer against RHOAI MLflow
 ```
 
 The script lives under `chart/files/` (not a separate directory) because
