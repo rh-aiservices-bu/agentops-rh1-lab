@@ -14,6 +14,8 @@ import json
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from . import settings
@@ -23,9 +25,18 @@ from .streaming import run_stream
 app = FastAPI(title="Water Plant Maintenance Assistant", version="0.1.0")
 
 
+class Turn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=8000)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     persona: str = "operator"
+    #: The conversation so far, replayed by the caller. The agent holds no
+    #: session state — see runtime.opening_messages for why, and for what a
+    #: client-supplied transcript does and does not mean.
+    history: list[Turn] = Field(default_factory=list, max_length=100)
 
 
 @app.get("/healthz", include_in_schema=False)
@@ -42,11 +53,15 @@ async def info() -> dict:
     }
 
 
+def _history(req: ChatRequest) -> list[dict[str, str]]:
+    return [turn.model_dump() for turn in req.history]
+
+
 @app.post("/chat")
 async def chat(req: ChatRequest, request: Request) -> JSONResponse:
     token = request.headers.get("authorization")
     try:
-        result = await run(req.message, token=token)
+        result = await run(req.message, token=token, history=_history(req))
     except RateLimited as exc:
         return JSONResponse({"error": "rate_limited", "detail": str(exc)}, status_code=429)
 
@@ -83,7 +98,7 @@ async def chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
 
     async def events():
         try:
-            async for event in run_stream(req.message, token=token):
+            async for event in run_stream(req.message, token=token, history=_history(req)):
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as exc:  # never leave the stream hanging open
             yield f'data: {json.dumps({"type": "error", "detail": str(exc)})}\n\n'

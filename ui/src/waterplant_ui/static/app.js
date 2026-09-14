@@ -377,6 +377,30 @@ function addMessage(role, text) {
   stick(chat, pinned);
 }
 
+/* The conversation, as the console remembers it.
+ *
+ * Nothing server-side keeps it: the BFF and the agent are both stateless, and
+ * plant-api is deliberately the only stateful pod per participant. So the
+ * transcript lives where it is already on screen, and is replayed with each
+ * question. Without it a follow-up has nothing to follow — "check pump 3" is
+ * answered and offers to start it, then "yes" arrives cold and is met with
+ * "Hello! How can I assist you today?"
+ *
+ * Only what was actually said is kept. Trace lines and system errors are the
+ * console's own narration and would read to the model as though the operator
+ * had typed them. Trimmed to the same bound the agent enforces, so a long
+ * session degrades by forgetting its oldest turns rather than by failing.
+ */
+const MAX_HISTORY_TURNS = 20;
+const history = [];
+
+function remember(role, content) {
+  const text = (content || "").trim();
+  if (!text) return;
+  history.push({ role, content: text });
+  if (history.length > MAX_HISTORY_TURNS) history.splice(0, history.length - MAX_HISTORY_TURNS);
+}
+
 /* Streamed request.
  *
  * Tool calls are rendered the moment they fire rather than summarised at the
@@ -394,8 +418,14 @@ async function ask(event) {
   input.value = "";
   $("send").disabled = true;
 
+  // Snapshot before the new turn joins it, so the question is not also in the
+  // history the request replays.
+  const priorTurns = history.slice();
+  remember("user", message);
+
   const chat = $("chat");
   let replyLine = null;
+  let replyText = "";
 
   const write = (text) => {
     const pinned = isPinned(chat);
@@ -410,6 +440,7 @@ async function ask(event) {
       chat.appendChild(replyLine);
     }
     replyLine.appendChild(document.createTextNode(text));
+    replyText += text;
     stick(chat, pinned);
   };
 
@@ -429,7 +460,11 @@ async function ask(event) {
     const res = await fetch("/api/chat/stream", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ message, persona: $("persona").value }),
+      body: JSON.stringify({
+        message,
+        persona: $("persona").value,
+        history: priorTurns,
+      }),
     });
 
     if (!res.ok || !res.body) {
@@ -488,6 +523,12 @@ async function ask(event) {
   } catch (err) {
     addMessage("system", `Could not reach the assistant: ${err.message}`);
   } finally {
+    // Recorded here rather than on the "done" event so a turn cut short by a
+    // rate limit or a dropped stream still leaves behind what was actually
+    // said. A partial answer is context; a missing one silently desynchronises
+    // the transcript from what the operator can see on screen.
+    remember("assistant", replyText);
+
     // Re-park the cursor at the foot of the buffer.
     chat.querySelector(".cursor-line")?.remove();
     const cur = document.createElement("p");

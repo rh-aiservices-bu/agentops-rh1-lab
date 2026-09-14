@@ -329,7 +329,7 @@ If Phase 6 dry runs show `plant-api` restarting more than rarely, the cheap fix 
 
 ### 2.9 What we learned building it
 
-Four findings from Phase 0 that were not obvious in advance, and that anyone
+Five findings from Phase 0 that were not obvious in advance, and that anyone
 maintaining this needs to know.
 
 #### The prompt became the authorization mechanism
@@ -403,6 +403,49 @@ Questions for whoever owns the MaaS tenancy: is the limit per virtual key — if
 so, per-attendee keys help — what is the quota, and can it be raised for the
 event window? The 429s are `vertex_aiException — Resource exhausted`, so the
 ceiling may be upstream of LiteLLM entirely.
+
+#### Swapping the harness proved the claim and found where it leaks
+
+BYOA is asserted on a slide; `agent.harness: hermes` is the claim stated in
+configuration. Hermes passes the golden workflow with the plant, the MCP
+servers, the policy layer and the console untouched, reaching the same diagnosis
+by the same route and citing MR-2246 unprompted. That is the good news, and it
+is worth more than the assertion.
+
+Three things the swap exposed, all of which argue the same point.
+
+**The eval suite must not encode one agent's habits.** Hermes derates Pump 4 to
+85% where ours picks 70% — a defensible call from the same evidence, since only
+the 40% floor is written down. `grade()` scores the tool calls made, not the
+values chosen, so both pass. Had it asserted `speed == 70` it would have scored
+a correct run at zero, and `evalctl` would have been measuring the framework
+rather than the platform. Keep the criteria harness-neutral.
+
+**Trace and identity are currently the agent's, and should be the platform's.**
+Hermes runs its loop server-side and returns only the finished answer, so there
+are no tool calls to render — and module 6 has participants debug an
+over-restrictive policy *from the trace*. It also authenticates with one static
+server key and rejects a participant token, so the console must hold a service
+credential and the caller's identity stops there, which is Scenarios 1, 4 and 6.
+Both are reported through `/api/config` so an exercise fails loudly. Both also
+say the same thing: put tracing and identity at MCP Gateway, where they survive
+a harness swap. Right now our own agent is quietly holding up module 6.
+
+**A third-party harness fails in ways ours cannot.** Hermes dials MCP once at
+start-up, retries three times over about seven seconds, and then gives up for
+the life of the process. Lose that race — a cluster restart brings it up
+alongside the MCP servers — and it starts healthy, passes its probes, serves
+requests, and answers plant questions out of its *local shell* instead: "I don't
+see any files related to pumps in the current directory." Nothing says why. With
+30 participants and one restart that is 30 agents that look fine and cannot
+reach a tool. The chart now gates start-up on MCP reachability and fails the pod
+rather than starting without it, because a CrashLoopBackOff names the problem
+and a shell-only agent does not.
+
+That local terminal backend is worth a decision rather than a default. Hermes
+warns about it itself — *"API server is network-accessible (0.0.0.0) AND the
+terminal backend is 'local' (unsandboxed)"* — and it is a more honest module 4
+subject than our own `run_diagnostic`, because we did not plant it.
 
 ---
 

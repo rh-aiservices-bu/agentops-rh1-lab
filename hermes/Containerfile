@@ -1,0 +1,33 @@
+# Hermes with MCP support.
+#
+# The published cai-krew image is built without hermes-agent's optional [mcp]
+# extra, so the `mcp` package is absent entirely. Hermes still lists configured
+# MCP servers as enabled and reports them in `hermes mcp list`, which makes the
+# omission easy to miss — the failure only surfaces on connect:
+#
+#   MCP server 'telemetry_mcp' requires HTTP transport but
+#   mcp.client.streamable_http is not available.
+#
+# Everything else about that image is right for OpenShift: UBI9, tini rather
+# than s6-overlay, non-root. So this layers the missing dependency on rather
+# than rebuilding from source.
+#
+# Building it here also puts the image in our own registry rather than pulling
+# a third-party tag at run time.
+FROM quay.io/ckavili/hermes-mem0:0.0.3
+
+USER 0
+
+# Exactly the versions hermes-agent 0.17.0 declares for its [mcp] extra —
+# `mcp==1.26.0; extra == "mcp"` and `starlette==1.0.1; extra == "mcp"`.
+# Pinned rather than floating, per the project's standing rule.
+RUN /opt/hermes/venv/bin/pip install --no-cache-dir \
+        "mcp==1.26.0" \
+        "starlette==1.0.1" \
+ && /opt/hermes/venv/bin/python -c "import mcp.client.streamable_http" \
+ && chgrp -R 0 /opt/hermes/venv \
+ && chmod -R g=u /opt/hermes/venv
+
+# OpenShift assigns an arbitrary UID in the restricted-v2 range and ignores
+# this, but it keeps the image correct anywhere else.
+USER 1001
