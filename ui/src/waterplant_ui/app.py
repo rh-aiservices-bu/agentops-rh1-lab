@@ -14,6 +14,7 @@ consequence of a tool call independently of what the agent claims happened.
 from __future__ import annotations
 
 import os
+import ssl
 from pathlib import Path
 from typing import Any, Literal
 
@@ -34,6 +35,11 @@ MLFLOW_URL = os.environ.get("MLFLOW_URL", "")
 # through the shared endpoint's 429s. A 30s timeout cut off healthy requests.
 TIMEOUT_S = float(os.environ.get("HTTP_TIMEOUT_S", "300"))
 
+# mTLS for OpenShell gateway service-relay URLs — see hermes/README.md.
+AGENT_TLS_CA = os.environ.get("AGENT_TLS_CA", "")
+AGENT_TLS_CERT = os.environ.get("AGENT_TLS_CERT", "")
+AGENT_TLS_KEY = os.environ.get("AGENT_TLS_KEY", "")
+
 STATIC = Path(__file__).parent / "static"
 
 app = FastAPI(title="Water Plant UI", version="0.1.0")
@@ -43,7 +49,14 @@ _client: httpx.AsyncClient | None = None
 def client() -> httpx.AsyncClient:
     global _client
     if _client is None:
-        _client = httpx.AsyncClient(timeout=TIMEOUT_S)
+        kwargs: dict[str, Any] = {"timeout": TIMEOUT_S}
+        if AGENT_TLS_CA and AGENT_TLS_CERT and AGENT_TLS_KEY:
+            # httpx 0.28's verify= + cert= combo silently drops the client
+            # cert; building the SSLContext ourselves works.
+            ctx = ssl.create_default_context(cafile=AGENT_TLS_CA)
+            ctx.load_cert_chain(AGENT_TLS_CERT, AGENT_TLS_KEY)
+            kwargs["verify"] = ctx
+        _client = httpx.AsyncClient(**kwargs)
     return _client
 
 

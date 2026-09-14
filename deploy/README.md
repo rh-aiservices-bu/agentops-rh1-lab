@@ -183,11 +183,16 @@ whose tool access can be configured independently.
 
 The script:
 1. Renders `deploy/keycloak/realms/waterplant-realm-template.yaml` with the
-   participant name and applies it
+   participant name (and a fresh `wp-dev/hermes-agent` client secret) and applies it
 2. Polls until the realm import completes
-3. Patches `mcp-auth-policy` to accept JWTs from the new realm
-4. Patches `mcp-authz-policy` to validate tool-call JWTs from the new realm
-5. Appends the realm's issuer URL to the `MCPGatewayExtension` authorization server list
+3. Patches `mcp-auth-policy` to accept JWTs from the new realm (public listener)
+4. Patches `telemetry-mcp-authz` to validate tool-call JWTs from the new realm
+5. Patches `maintenance-mcp-authz` to validate tool-call JWTs from the new realm
+6. Patches `control-mcp-authz` to validate tool-call JWTs from the new realm
+7. Appends the realm's issuer URL to the `MCPGatewayExtension` authorization server list
+8. Creates a `<name>-admin`/`redhat` realm-admin user in the new realm
+9. If the `hermes-openshell` chart is installed (Step 7 below): provisions this
+   participant's Hermes-OpenShell sandbox
 
 The Keycloak hostname is derived automatically from the live route — no hardcoded values.
 
@@ -210,6 +215,144 @@ tool roles as part of the lab exercises:
 
 ```
 https://<keycloak-host>/admin/waterplant-<name>/console
+```
+
+---
+
+## Step 7 — Deploy Hermes (OpenShell agent) — optional
+
+A second AI agent for the lab, alongside `agent/`: Hermes, run inside an
+[OpenShell](https://github.com/nvidia/openshell) sandbox. It runs
+`hermes gateway run` with its built-in OpenAI-compatible `api_server`
+platform via `openshell sandbox exec`, reachable through OpenShell's own
+gateway service-relay (not a plain Kubernetes Service) — see
+[`hermes/README.md`](../hermes/README.md) for the full design. Both real
+Landlock policy enforcement *and* reachability hold at the same time (a
+filesystem write outside the sandbox's allowlist fails, a request to a
+non-allowlisted host is blocked, and the console can still reach it) —
+`hermes-tmp/` holds an earlier, retired design that only got the
+enforcement half, kept for reference.
+
+This step is optional and independent of Steps 1–6 — skip it if you only need
+the core telemetry/maintenance/control lab.
+
+### 7a. Provision an LLM key Secret (reuses `agent/`'s existing convention)
+
+```bash
+oc create secret generic litellm-key -n wp-dev \
+  --from-literal=LITELLM_VIRTUAL_KEY=<key> --dry-run=client -o yaml | oc apply -f -
+```
+
+If `agent/` is already deployed, reuse its existing Secret name instead of
+creating a new one — see `hermes/chart/values.yaml`'s `llm.apiKeySecretRef`
+comment for the shared-fate tradeoff (both agents draw from the same
+rate-limited MaaS quota).
+
+### 7b. Install the shared OpenShell gateway
+
+One `helm install` per cluster — installs a dedicated OpenShell gateway in
+`wp-dev` (independent of any other OpenShell deployment elsewhere on the
+cluster) and renders the config/policy ConfigMap that
+`add-participant.sh` reads for each participant's sandbox:
+
+```bash
+helm install hermes-openshell hermes/chart -n wp-dev \
+  --set llm.apiKeySecretRef.name=litellm-key
+oc logs -f job/hermes-openshell-install-gateway -n wp-dev
+```
+
+Tune what the OpenShell sandbox policy allows/blocks via
+`hermes/chart/values.yaml`'s `openshellPolicy.*` (network egress allowlist
+toggles + an `extraNetworkPolicies` escape hatch, filesystem read-only/read-write
+lists) — pass overrides with `-f my-overrides.yaml` or `--set`.
+
+### 7c. Provision Hermes for each participant
+
+Already wired into `add-participant.sh` — if the chart above is installed
+before you run it, each participant automatically gets their own Hermes
+sandbox, MLflow experiment (named after the participant, auto-created —
+see `hermes/README.md`), and gateway service-relay endpoint. Hermes's own
+MCP calls authenticate as the realm's `operator` user, capped at the
+operator persona's own tool scope (see `hermes/README.md`'s "Hermes's MCP
+identity" section) — not the full-access `wp-dev/hermes-agent` service
+account that client role grant might suggest. Re-run `add-participant.sh
+<name>` for a participant created before you installed the chart to
+provision Hermes for them retroactively.
+
+### 7d. Point the UI at one participant's Hermes
+
+`waterplant-ui` has a single `AGENT_URL` — with Hermes provisioned
+per-participant, only one can be the live target at a time.
+
+Hermes is reached through the OpenShell gateway's **service relay**, not a
+plain Kubernetes Service (see `hermes/README.md`'s Architecture section for
+why: it's what lets Hermes run policy-enforced *and* stay reachable). That
+means `waterplant-ui` needs an mTLS client cert, a fake-hostname resolution
+entry, and — because the relay hop plus a busy shared MaaS endpoint means
+Hermes can go quiet for longer than the Router's default timeout — a longer
+Route idle timeout. None of the four commands below have a committed
+manifest behind them (`waterplant-ui`'s Deployment and Route were both
+created imperatively); re-run all four by hand whenever either is recreated
+from scratch, not just the first time.
+
+```bash
+NAME=<participant name, e.g. demo>
+NAMESPACE=wp-dev
+GATEWAY_IP=$(oc get svc openshell -n "${NAMESPACE}" -o jsonpath='{.spec.clusterIP}')
+API_SERVER_KEY=$(oc get secret "hermes-mcp-auth-${NAME}" -n "${NAMESPACE}" -o jsonpath='{.data.API_SERVER_KEY}' | base64 -d)
+
+# 1. mTLS client cert, so waterplant-ui can present one to the gateway
+#    (required unconditionally once the gateway's TLS is on — not just an
+#    auth-header check, the TLS handshake itself fails without it).
+oc set volumes deployment/waterplant-ui -n "${NAMESPACE}" \
+  --add --name=openshell-mtls --type=secret --secret-name=openshell-client-tls \
+  --mount-path=/etc/openshell-mtls --read-only=true
+
+# 2. The relay URL's hostname isn't real DNS — map it to the gateway's
+#    ClusterIP so waterplant-ui's own TLS/SNI still target the right name.
+oc patch deployment/waterplant-ui -n "${NAMESPACE}" --type=json -p="[
+  {\"op\":\"add\",\"path\":\"/spec/template/spec/hostAliases\",\"value\":[{\"ip\":\"${GATEWAY_IP}\",\"hostnames\":[\"default--hermes-${NAME}--openai.openshell.localhost\"]}]}
+]"
+
+# 3. Point AGENT_URL at the relay, not a Service DNS name, and tell
+#    ui/src/waterplant_ui/app.py where to find the cert files from step 1.
+oc set env deployment/waterplant-ui -n "${NAMESPACE}" \
+  AGENT_URL="https://default--hermes-${NAME}--openai.openshell.localhost:8080/" \
+  AGENT_PROTOCOL=openai \
+  AGENT_API_KEY="${API_SERVER_KEY}" \
+  AGENT_TLS_CA=/etc/openshell-mtls/ca.crt \
+  AGENT_TLS_CERT=/etc/openshell-mtls/tls.crt \
+  AGENT_TLS_KEY=/etc/openshell-mtls/tls.key
+
+# 4. The OpenShift Router's default idle timeout (~30s) kills the SSE
+#    connection mid-answer whenever Hermes pauses for a stretch (an LLM
+#    turn, a tool call) — confirmed live via a Route-level
+#    "transfer closed with outstanding read data remaining". 310s, not
+#    more: stay just above app.py's own HTTP_TIMEOUT_S (300s) so the Route
+#    never outlives what the app itself would already give up at.
+oc annotate route waterplant-ui -n "${NAMESPACE}" \
+  haproxy.router.openshift.io/timeout=310s --overwrite
+```
+
+If `waterplant-ui`'s Deployment ever gets fully rebuilt (not just restarted
+— e.g. `oc delete deployment/waterplant-ui` then recreated), steps 1-2 need
+re-running; if the Route is ever recreated, step 4 does. Steps 1-3 also need
+re-running whenever a *different* participant's Hermes becomes the live
+target (the hostname and Secret both change).
+
+### Verify
+
+```bash
+oc get sandbox default--hermes-<name> -n wp-dev
+oc get pods -n wp-dev -l app.kubernetes.io/name=hermes-sandbox,app.kubernetes.io/instance=<name>
+oc get secret openshell-client-tls -n wp-dev   # the mTLS cert waterplant-ui mounts
+oc get route waterplant-ui -n wp-dev -o jsonpath='{.metadata.annotations}'  # timeout should be present
+
+# Full round-trip through the UI's own backend (not just curling Hermes directly):
+UI_POD=$(oc get pod -n wp-dev -l app=waterplant-ui -o jsonpath='{.items[0].metadata.name}')
+oc exec "$UI_POD" -n wp-dev -- curl -s -X POST http://localhost:8080/api/chat \
+  -H "content-type: application/json" \
+  -d '{"message":"What is the current plant safety status?"}'
 ```
 
 ---
@@ -315,8 +458,16 @@ deploy/
 ├── auth/                          # Auth policy reference docs (JWT validation)
 ├── authz/                         # Authz policy reference doc (tool-level CEL rules)
 └── scripts/
-    └── add-participant.sh         # Provisions a new lab participant end-to-end
+    ├── add-participant.sh         # Provisions a new lab participant end-to-end
+    └── provision-hermes-sandbox.sh  # Per-participant Hermes sandbox — called by
+                                      # add-participant.sh, see hermes/README.md
 ```
+
+Hermes itself (the OpenShell-sandboxed agent and its Helm chart) lives in
+[`hermes/`](../hermes/) at the repo root, not under `deploy/` — see that
+directory's own README for why. The retired chat-adapter-based design (an
+alternative that kept network-policy enforcement at the cost of Hermes's own
+streaming/session features) is preserved at `hermes-tmp/`.
 
 ---
 
@@ -335,3 +486,14 @@ deploy/
   ```
   and update the client IDs in `waterplant-realm-template.yaml` and any existing
   participant realms accordingly.
+- **Hermes is per-participant but the UI is single-tenant** — `waterplant-ui`
+  has one `AGENT_URL`; only one participant's Hermes can be the live chat
+  backend at a time. See Step 7d.
+- **`add-participant.sh` step 8 (realm-admin user creation) will warn and
+  skip rather than fail outright if Keycloak's bootstrap
+  `keycloak-initial-admin` temp-admin credentials have expired** (a normal
+  RHBK/Keycloak Operator behavior after enough time or a permanent admin
+  exists) — confirmed live: the admin API call returns 403. Step 9 (Hermes
+  provisioning) still runs either way; only the per-realm `<name>-admin`
+  login won't exist until this is addressed some other way (a permanent
+  Keycloak admin, not just re-extending the temp one).
