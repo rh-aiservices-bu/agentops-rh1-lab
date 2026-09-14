@@ -9,6 +9,9 @@
 #   wp-dev/telemetry-mcp    — bearer-only resource server (read-only plant telemetry)
 #   wp-dev/maintenance-mcp  — bearer-only resource server (work orders, history)
 #   wp-dev/control-mcp      — bearer-only resource server (pump/valve control)
+#   wp-dev/hermes-agent     — confidential client_credentials identity for the
+#                              hermes/ OpenShell agent (see hermes/README.md);
+#                              full tool access via its service-account user
 #
 # Personas (users):
 #   operator / operator  — can call all safe operational tools
@@ -44,6 +47,32 @@ spec:
       realm:
         - name: operator
           description: Plant operator — normal shift duties
+      client:
+        # Tool roles must be explicitly declared here so they appear in the Keycloak
+        # admin UI and can be assigned/removed during lab exercises (Scenarios 3 & 4).
+        # These are referenced by the authz CEL rule:
+        #   ('tool:' + x-mcp-toolname) in resource_access[x-mcp-servername].roles
+        "wp-dev/telemetry-mcp":
+          - name: "tool:get_plant_safety_status"
+          - name: "tool:get_pump_status"
+          - name: "tool:get_all_pump_status"
+          - name: "tool:get_water_quality"
+          - name: "tool:get_reservoir_level"
+          - name: "tool:get_valve_positions"
+        "wp-dev/maintenance-mcp":
+          - name: "tool:search_maintenance_history"
+          - name: "tool:get_maintenance_record"
+          - name: "tool:list_work_orders"
+          - name: "tool:create_work_order"
+          - name: "tool:update_work_order"
+        "wp-dev/control-mcp":
+          - name: "tool:set_pump_speed"
+          - name: "tool:start_pump"
+          - name: "tool:stop_pump"
+          - name: "tool:open_valve"
+          - name: "tool:close_valve"
+          - name: "tool:dump_plant_configuration"
+          - name: "tool:emergency_shutdown"
 
     groups:
       - name: operators
@@ -108,6 +137,28 @@ spec:
         defaultClientScopes:
           - openid
 
+      # ── Hermes agent — confidential client_credentials identity ─────────────
+      # Used by hermes/'s chat adapter (mcp-token-refresh.py) to authenticate to
+      # the MCP Gateway as itself, not on behalf of whoever is chatting through
+      # the UI — see hermes/README.md's "Known functional gaps" section.
+      # Full tool access (mirrors the lab's intentionally over-privileged main
+      # agent, including dump_plant_configuration/emergency_shutdown — NOT the
+      # restricted operator persona above) — see clientScopeMappings below.
+      # Secret substituted by add-participant.sh, generated per participant.
+      - clientId: wp-dev/hermes-agent
+        name: Hermes Agent (OpenShell)
+        enabled: true
+        publicClient: false
+        bearerOnly: false
+        serviceAccountsEnabled: true
+        standardFlowEnabled: false
+        directAccessGrantsEnabled: false
+        protocol: openid-connect
+        secret: "${HERMES_AGENT_CLIENT_SECRET}"
+        defaultClientScopes:
+          - openid
+          - roles
+
     clientScopes:
       - name: groups
         protocol: openid-connect
@@ -144,6 +195,24 @@ spec:
               jsonType.label: String
 
     users:
+      # ── Realm admin ──────────────────────────────────────────────────────────
+      # Allows access to the Keycloak admin console for this realm:
+      #   https://<keycloak-host>/admin/waterplant-${PARTICIPANT_NAME}/console
+      # Used by lab facilitators to demonstrate adding/removing tool roles.
+      - username: admin
+        email: admin@waterplant.local
+        firstName: Realm
+        lastName: Admin
+        enabled: true
+        emailVerified: true
+        credentials:
+          - type: password
+            value: redhat
+            temporary: false
+        clientRoles:
+          realm-management:
+            - realm-admin
+
       # ── Operator persona ─────────────────────────────────────────────────────
       # Safe operational tools only.
       # Scenario 3 exercise: add "tool:dump_plant_configuration" to control-mcp roles
@@ -185,9 +254,48 @@ spec:
             # "tool:dump_plant_configuration" — withheld (Scenario 3)
             # "tool:emergency_shutdown"       — withheld (Scenario 4)
 
+      # ── Hermes agent's service-account user ──────────────────────────────────
+      # Keycloak auto-creates this user when wp-dev/hermes-agent's
+      # serviceAccountsEnabled is true; its username is always
+      # "service-account-<clientId>". Full tool access, unlike operator above —
+      # see hermes/README.md.
+      - username: service-account-wp-dev/hermes-agent
+        enabled: true
+        serviceAccountClientId: wp-dev/hermes-agent
+        clientRoles:
+          wp-dev/telemetry-mcp:
+            - "tool:get_plant_safety_status"
+            - "tool:get_pump_status"
+            - "tool:get_all_pump_status"
+            - "tool:get_water_quality"
+            - "tool:get_reservoir_level"
+            - "tool:get_valve_positions"
+          wp-dev/maintenance-mcp:
+            - "tool:search_maintenance_history"
+            - "tool:get_maintenance_record"
+            - "tool:list_work_orders"
+            - "tool:create_work_order"
+            - "tool:update_work_order"
+          wp-dev/control-mcp:
+            - "tool:set_pump_speed"
+            - "tool:start_pump"
+            - "tool:stop_pump"
+            - "tool:open_valve"
+            - "tool:close_valve"
+            - "tool:dump_plant_configuration"
+            - "tool:emergency_shutdown"
+
     clientScopeMappings:
       wp-dev/telemetry-mcp:
         - client: mcp-gateway
+          roles:
+            - "tool:get_plant_safety_status"
+            - "tool:get_pump_status"
+            - "tool:get_all_pump_status"
+            - "tool:get_water_quality"
+            - "tool:get_reservoir_level"
+            - "tool:get_valve_positions"
+        - client: wp-dev/hermes-agent
           roles:
             - "tool:get_plant_safety_status"
             - "tool:get_pump_status"
@@ -203,6 +311,13 @@ spec:
             - "tool:list_work_orders"
             - "tool:create_work_order"
             - "tool:update_work_order"
+        - client: wp-dev/hermes-agent
+          roles:
+            - "tool:search_maintenance_history"
+            - "tool:get_maintenance_record"
+            - "tool:list_work_orders"
+            - "tool:create_work_order"
+            - "tool:update_work_order"
       wp-dev/control-mcp:
         - client: mcp-gateway
           roles:
@@ -211,3 +326,14 @@ spec:
             - "tool:stop_pump"
             - "tool:open_valve"
             - "tool:close_valve"
+        # Full access, including the two tools withheld from the operator
+        # persona above — see hermes/README.md.
+        - client: wp-dev/hermes-agent
+          roles:
+            - "tool:set_pump_speed"
+            - "tool:start_pump"
+            - "tool:stop_pump"
+            - "tool:open_valve"
+            - "tool:close_valve"
+            - "tool:dump_plant_configuration"
+            - "tool:emergency_shutdown"

@@ -1,0 +1,344 @@
+# Renders the config/policy templates + adapter scripts that
+# deploy/scripts/add-participant.sh reads to provision each participant's
+# Hermes sandbox.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermes-openshell-scripts
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "hermes-openshell.labels" . | nindent 4 }}
+data:
+  hermes-config.yaml.template: |
+    # Hermes Agent config — Water Plant AgentOps lab (OpenShell sandbox variant).
+    # ${OPENAI_API_KEY} is substituted per-sandbox by add-participant.sh.
+
+    model:
+      default: {{ .Values.llm.model | quote }}
+      provider: custom
+      base_url: {{ .Values.llm.baseUrl | quote }}
+      api_key: ${OPENAI_API_KEY}
+
+    custom_providers:
+      - name: {{ .Values.llm.model | quote }}
+        base_url: {{ .Values.llm.baseUrl | quote }}
+        api_key: ${OPENAI_API_KEY}
+        model: {{ .Values.llm.model | quote }}
+
+    toolsets:
+      - hermes-cli
+      - {{ .Values.mcp.serverName }}
+
+    {{- if .Values.mlflow.enabled }}
+    plugins:
+      enabled: [hermes_otel]
+    {{- end }}
+
+    # No approval surface on this headless path; OpenShell's Landlock
+    # policy is the real enforcement boundary here. See hermes/README.md.
+    approvals:
+      mode: "off"
+
+    # host/port here are display-only — actual values come from
+    # API_SERVER_HOST/PORT env vars (see .sandbox-init.sh). skip_auth needs
+    # the extra: nesting to take effect; see hermes/README.md.
+    platforms:
+      api_server:
+        enabled: true
+        host: 0.0.0.0
+        port: {{ .Values.adapter.port }}
+        extra:
+          skip_auth: true
+
+    mcp_servers:
+      {{ .Values.mcp.serverName }}:
+        url: {{ .Values.mcp.gatewayUrl | quote }}
+        transport: {{ .Values.mcp.transport | quote }}
+        auth: oauth
+        ssl_verify: {{ .Values.mcp.sslVerify }}
+        timeout: {{ .Values.mcp.toolTimeoutSeconds }}
+
+    agent:
+      max_turns: 150
+      gateway_timeout: 1800
+      api_max_retries: 3
+      tool_use_enforcement: auto
+      task_completion_guidance: true
+      parallel_tool_call_guidance: true
+      environment_probe: true
+      coding_context: auto
+      verify_on_stop: true
+      gateway_timeout_warning: 900
+      clarify_timeout: 600
+      image_input_mode: auto
+      reasoning_effort: medium
+      verbose: false
+
+    terminal:
+      backend: local
+      timeout: 180
+      persistent_shell: true
+      auto_source_bashrc: true
+      cwd: /workspace
+      home_mode: auto
+
+    compression:
+      enabled: true
+      threshold: 0.5
+      target_ratio: 0.2
+      protect_last_n: 20
+      protect_first_n: 3
+
+    context:
+      engine: compressor
+
+    tool_output:
+      max_bytes: 50000
+      max_lines: 2000
+      max_line_length: 2000
+
+    tool_loop_guardrails:
+      warnings_enabled: true
+      hard_stop_enabled: false
+      warn_after:
+        exact_failure: 2
+        same_tool_failure: 3
+        idempotent_no_progress: 2
+      hard_stop_after:
+        exact_failure: 5
+        same_tool_failure: 8
+        idempotent_no_progress: 5
+
+    model_catalog:
+      enabled: false
+
+    security:
+      redact_secrets: true
+      tirith_enabled: true
+
+    display:
+      compact: false
+      streaming: true
+      show_reasoning: false
+      inline_diffs: true
+      file_mutation_verifier: true
+
+    logging:
+      level: INFO
+      max_size_mb: 5
+      backup_count: 3
+
+    file_read_max_chars: 100000
+
+    web:
+      backend: ddgs
+      search_backend: ''
+      extract_backend: ''
+
+  SOUL.md: |
+{{ .Values.persona.soul | indent 4 }}
+{{- if .Values.mlflow.enabled }}
+  hermes-otel-config.yaml.template: |
+    enabled: true
+    force_flush_on_session_end: true
+    capture_sender_id: true
+    capture_conversation_history: true
+    backends:
+      - type: otlp
+        name: mlflow
+        endpoint: {{ .Values.mlflow.trackingUri }}/v1/traces
+        metrics: false
+        logs: false
+        headers:
+          x-mlflow-experiment-id: "${MLFLOW_EXPERIMENT_ID}"
+          Authorization: "Bearer ${MLFLOW_SA_TOKEN}"
+          X-MLflow-Workspace: {{ .Values.namespace | quote }}
+{{- end }}
+
+  policy-standard.yaml.template: |
+    # OpenShell sandbox policy. Egress is an explicit allowlist; anything
+    # not listed is blocked. Toggle groups via values.yaml's openshellPolicy.*
+
+    version: 1
+
+    filesystem_policy:
+      include_workdir: true
+      read_only:
+        {{- range .Values.openshellPolicy.filesystem.readOnly }}
+        - {{ . }}
+        {{- end }}
+      read_write:
+        {{- range .Values.openshellPolicy.filesystem.readWrite }}
+        - {{ . }}
+        {{- end }}
+
+    landlock:
+      compatibility: best_effort
+
+    process:
+      run_as_user: sandbox
+      run_as_group: sandbox
+
+    network_policies:
+{{- if .Values.openshellPolicy.allowMaaS }}
+      litellm_maas:
+        name: "LLM MaaS endpoint"
+        endpoints:
+          - host: {{ regexReplaceAll "^https?://" .Values.llm.baseUrl "" | quote }}
+            port: 443
+            protocol: rest
+            enforcement: enforce
+            access: full
+        binaries:
+          - { path: /usr/bin/curl }
+          - { path: /usr/bin/python3 }
+          - { path: /usr/bin/python3.12 }
+          - { path: "/usr/local/bin/hermes" }
+{{- end }}
+{{- if .Values.openshellPolicy.allowMCPGateway }}
+      mcp_gateway:
+        name: "Water Plant MCP Gateway"
+        endpoints:
+          - host: {{ regexReplaceAll "^https?://([^/]+).*$" .Values.mcp.gatewayUrl "$1" | quote }}
+            port: 443
+            protocol: rest
+            enforcement: enforce
+            access: full
+        binaries:
+          - { path: /usr/bin/curl }
+          - { path: /usr/bin/python3 }
+          - { path: /usr/bin/python3.12 }
+          - { path: "/usr/local/bin/hermes" }
+{{- end }}
+{{- if .Values.openshellPolicy.allowKeycloak }}
+      keycloak_token:
+        name: "Keycloak token endpoint (mcp-token-refresh.py)"
+        endpoints:
+          - host: "${KEYCLOAK_HOST}"
+            port: 443
+            protocol: rest
+            enforcement: enforce
+            access: full
+        binaries:
+          - { path: /usr/bin/python3 }
+          - { path: /usr/bin/python3.12 }
+{{- end }}
+{{- if .Values.openshellPolicy.allowDuckDuckGo }}
+      duckduckgo:
+        name: "DuckDuckGo Search"
+        endpoints:
+          - host: duckduckgo.com
+            port: 443
+            protocol: rest
+            enforcement: enforce
+            access: read-only
+          - host: links.duckduckgo.com
+            port: 443
+            enforcement: enforce
+            access: read-only
+          - host: html.duckduckgo.com
+            port: 443
+            enforcement: enforce
+            access: read-only
+        binaries:
+          - { path: /usr/bin/python3 }
+          - { path: /usr/bin/python3.12 }
+          - { path: "/usr/local/bin/hermes" }
+{{- end }}
+{{- if .Values.openshellPolicy.allowGithub }}
+      github_readonly:
+        name: "GitHub (read-only)"
+        endpoints:
+          - host: github.com
+            port: 443
+            protocol: rest
+            enforcement: enforce
+            access: read-only
+          - host: api.github.com
+            port: 443
+            protocol: rest
+            enforcement: enforce
+            access: read-only
+          - host: "*.githubusercontent.com"
+            port: 443
+            enforcement: enforce
+            access: read-only
+        binaries:
+          - { path: /usr/bin/curl }
+          - { path: /usr/bin/git }
+          - { path: /usr/bin/python3 }
+{{- end }}
+{{- if .Values.openshellPolicy.allowPyPI }}
+      pypi:
+        name: "PyPI"
+        endpoints:
+          - host: pypi.org
+            port: 443
+            protocol: rest
+            enforcement: enforce
+            access: full
+          - host: files.pythonhosted.org
+            port: 443
+            enforcement: enforce
+            access: full
+        binaries:
+          - { path: /usr/bin/curl }
+          - { path: /usr/bin/python3 }
+          - { path: /usr/bin/python3.12 }
+{{- end }}
+{{- if .Values.openshellPolicy.allowModelCatalog }}
+      nousresearch:
+        name: "NousResearch (model catalog)"
+        endpoints:
+          - host: hermes-agent.nousresearch.com
+            port: 443
+            protocol: rest
+            enforcement: enforce
+            access: read-only
+          - host: models.dev
+            port: 443
+            protocol: rest
+            enforcement: enforce
+            access: read-only
+        binaries:
+          - { path: /usr/bin/curl }
+          - { path: /usr/bin/python3 }
+          - { path: "/usr/local/bin/hermes" }
+{{- end }}
+{{- if or .Values.openshellPolicy.allowMLflow .Values.mlflow.enabled }}
+      mlflow_rhoai:
+        name: "RHOAI MLflow"
+        endpoints:
+          - host: {{ regexReplaceAll "^https?://([^/]+).*$" .Values.mlflow.trackingUri "$1" | quote }}
+            port: 443
+            protocol: rest
+            enforcement: enforce
+            access: full
+        binaries:
+          - { path: /usr/bin/curl }
+          - { path: /usr/bin/python3 }
+          - { path: /usr/bin/python3.12 }
+{{- end }}
+{{- range $key, $group := .Values.openshellPolicy.extraNetworkPolicies }}
+      {{ $key }}:
+{{ toYaml $group | indent 8 }}
+{{- end }}
+
+  # chat-adapter.py isn't embedded here — see hermes-tmp/ for that
+  # retired design; this build runs `hermes gateway run` directly.
+
+  mcp-token-refresh.py: |
+{{ .Files.Get "files/mcp-token-refresh.py" | indent 4 }}
+
+  # Non-secret metadata read by provision-hermes-sandbox.sh.
+  provision.env: |
+    IMAGE_REF={{ .Values.image.repository }}:{{ .Values.image.tag }}
+    LLM_API_KEY_SECRET_NAME={{ .Values.llm.apiKeySecretRef.name }}
+    LLM_API_KEY_SECRET_KEY={{ .Values.llm.apiKeySecretRef.key }}
+    LLM_MODEL={{ .Values.llm.model }}
+    LLM_BASE_URL={{ .Values.llm.baseUrl }}
+    MCP_SERVER_NAME={{ .Values.mcp.serverName }}
+    # Named ADAPTER_PORT for historical continuity; it's api_server's port.
+    ADAPTER_PORT={{ .Values.adapter.port }}
+    OPENSHELL_CLI_VERSION={{ .Values.openshellGateway.cliVersion }}
+    MLFLOW_TRACKING_URI={{ .Values.mlflow.trackingUri }}

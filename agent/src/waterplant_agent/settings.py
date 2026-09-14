@@ -20,6 +20,9 @@ LITELLM_VIRTUAL_KEY = os.environ.get("LITELLM_VIRTUAL_KEY", "")
 
 TEMPERATURE = float(os.environ.get("AGENT_TEMPERATURE", "0"))
 MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "14"))
+#: How many prior turns of the conversation the console may replay. Caps
+#: what an unbounded transcript can do to the model's context window.
+MAX_HISTORY_TURNS = int(os.environ.get("AGENT_MAX_HISTORY_TURNS", "20"))
 REQUEST_TIMEOUT_S = float(os.environ.get("AGENT_TIMEOUT_S", "180"))
 
 #: The shared MaaS endpoint returns 429 under very little load — a single

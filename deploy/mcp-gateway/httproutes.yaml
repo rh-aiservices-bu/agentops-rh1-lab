@@ -1,0 +1,74 @@
+# HTTPRoutes that expose the three wp-dev MCP servers through the MCP Gateway.
+#
+# Each route lives in wp-dev (alongside the service it points to) and declares
+# the mcp-gateway (in the mcp-gateway namespace) as its parent.  The hostname
+# follows the *.mcp.local convention used by all registered MCP servers on
+# this cluster.
+#
+# These routes are the prerequisite for MCPServerRegistrations (below).
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: telemetry-mcp-route
+  namespace: wp-dev
+  labels:
+    mcp-server: "true"
+spec:
+  parentRefs:
+    - name: mcp-gateway
+      namespace: mcp-gateway
+  hostnames:
+    - telemetry-mcp.mcp.local
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: telemetry-mcp
+          port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: maintenance-mcp-route
+  namespace: wp-dev
+  labels:
+    mcp-server: "true"
+spec:
+  parentRefs:
+    - name: mcp-gateway
+      namespace: mcp-gateway
+  hostnames:
+    - maintenance-mcp.mcp.local
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: maintenance-mcp
+          port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: control-mcp-route
+  namespace: wp-dev
+  labels:
+    mcp-server: "true"
+spec:
+  parentRefs:
+    - name: mcp-gateway
+      namespace: mcp-gateway
+  hostnames:
+    - control-mcp.mcp.local
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: control-mcp
+          port: 8080

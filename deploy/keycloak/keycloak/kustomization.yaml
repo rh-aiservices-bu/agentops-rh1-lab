@@ -4,5 +4,4 @@ resources:
   - keycloak-db-secret.yaml
   - keycloak-postgresql.yaml
   - keycloak.yaml
-  - keycloakrealmimport-mcp.yaml
   - keycloak-route.yaml

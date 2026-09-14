@@ -103,14 +103,47 @@ async def _complete(http: httpx.AsyncClient, payload: dict, counter: list[int]) 
     raise RateLimited("unreachable")
 
 
-async def run(message: str, token: str | None = None) -> AgentReply:
+def opening_messages(
+    message: str, history: list[dict[str, str]] | None = None
+) -> list[dict[str, Any]]:
+    """The system prompt, the conversation so far, and the new question.
+
+    The conversation is supplied by the caller rather than held here. Every
+    service in this lab is stateless except plant-api (§D14), and a per-session
+    store in the agent would be a second thing to reset and a reason for the
+    agent to need sticky routing. The console already has the transcript on
+    screen; it sends it back.
+
+    Without this an operator gets a good answer and then cannot follow it up:
+    "check pump 3" is answered, "yes" arrives with no idea what was offered and
+    is met with "Hello! How can I assist you today?"
+
+    Two consequences worth stating. The history is client-supplied and therefore
+    forgeable — a caller can claim the assistant said anything. That is
+    consistent with the rest of the design, since the agent is not an
+    authorization boundary and its tool calls are authorized on their own merits
+    at the gateway; but it does mean the transcript is not the audit record. The
+    trace is. Turns are also capped, because an unbounded transcript walks into
+    the model's context limit mid-workshop.
+    """
+    opening: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for turn in (history or [])[-settings.MAX_HISTORY_TURNS :]:
+        role, content = turn.get("role"), turn.get("content")
+        if role in ("user", "assistant") and content:
+            opening.append({"role": role, "content": content})
+    opening.append({"role": "user", "content": message})
+    return opening
+
+
+async def run(
+    message: str,
+    token: str | None = None,
+    history: list[dict[str, str]] | None = None,
+) -> AgentReply:
     retries = [0]
 
     async with open_tools(token) as session:
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": message},
-        ]
+        messages: list[dict[str, Any]] = opening_messages(message, history)
 
         async with httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT_S) as http:
             for step in range(settings.MAX_STEPS):

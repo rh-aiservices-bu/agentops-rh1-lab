@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Binary BuildConfigs for all five app components.
+# After applying, build each image with:
+#   oc start-build plant-api      --from-dir=plant-api/      -n wp-dev --follow
+#   oc start-build telemetry-mcp  --from-dir=mcp-telemetry/  -n wp-dev --follow
+#   oc start-build maintenance-mcp --from-dir=mcp-maintenance/ -n wp-dev --follow
+#   oc start-build control-mcp    --from-dir=mcp-control/    -n wp-dev --follow
+#   oc start-build waterplant-ui  --from-dir=ui/             -n wp-dev --follow
+#
+# Note: Deployments, Services, and Routes are not captured here.
+# They exist on the cluster but must be recreated separately on a fresh cluster.
+resources:
+  - plant-api-buildconfig.yaml
+  - telemetry-mcp-buildconfig.yaml
+  - maintenance-mcp-buildconfig.yaml
+  - control-mcp-buildconfig.yaml
+  - waterplant-ui-buildconfig.yaml
