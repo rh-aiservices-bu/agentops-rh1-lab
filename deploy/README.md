@@ -10,8 +10,9 @@ on an OpenShift cluster.  Steps are ordered; each section depends on the previou
 - MCP Gateway operator already installed on the cluster (the lab assumes a shared cluster
   where this is pre-provisioned)
 - Kuadrant and Authorino already running in the `mcp-gateway` namespace
-- The source directories `plant-api/`, `mcp-telemetry/`, `mcp-maintenance/`,
-  `mcp-control/`, and `ui/` present at the repo root (they contain the Containerfiles)
+- The application images already built and pushed to `quay.io/rh-aiservices-bu`
+  (see the repo root README, "Building and deploying"). This guide deploys published
+  images; it does not build them.
 
 ---
 
@@ -23,28 +24,17 @@ oc new-project wp-dev
 
 ---
 
-## Step 2 — Build and deploy the applications
+## Step 2 — Deploy the applications
 
-The five app components are built on-cluster from local source using binary builds.
+The five app components run from images published to `quay.io/rh-aiservices-bu`
+(`agentops-rh1-plant-api`, `-mcp-telemetry`, `-mcp-maintenance`, `-mcp-control`, `-ui`),
+each pinned to an immutable tag — never `:latest`. Building and pushing them is covered
+in the repo root README under "Building and deploying"; nothing is built on the cluster.
 
-### 2a. Apply the BuildConfigs
-
-```bash
-oc apply -k deploy/apps/
-```
-
-### 2b. Build each image
-
-Run from the repo root.  Each command uploads the local directory to the cluster builder
-and streams the build log.
-
-```bash
-oc start-build plant-api       --from-dir=plant-api/       -n wp-dev --follow
-oc start-build telemetry-mcp   --from-dir=mcp-telemetry/   -n wp-dev --follow
-oc start-build maintenance-mcp --from-dir=mcp-maintenance/ -n wp-dev --follow
-oc start-build control-mcp     --from-dir=mcp-control/     -n wp-dev --follow
-oc start-build waterplant-ui   --from-dir=ui/              -n wp-dev --follow
-```
+> **Superseded:** `deploy/apps/` still holds binary BuildConfigs from the earlier
+> on-cluster build path (`oc apply -k deploy/apps/`, then `oc start-build … --from-dir=`).
+> They are kept for reference only — standing an environment up that way leaves the
+> namespace running an image that exists nowhere else.
 
 > **Note:** Deployments, Services, and Routes for these apps are not captured in this
 > repo.  On a fresh cluster they must be created separately (e.g. via `oc new-app` or
@@ -442,7 +432,8 @@ curl -sk -X POST "$MCP_URL" \
 
 ```
 deploy/
-├── apps/                          # Binary BuildConfigs for the five app components
+├── apps/                          # Superseded: binary BuildConfigs from the on-cluster
+│                                  # build path; images now come from quay.io
 │   ├── plant-api-buildconfig.yaml
 │   ├── telemetry-mcp-buildconfig.yaml
 │   ├── maintenance-mcp-buildconfig.yaml

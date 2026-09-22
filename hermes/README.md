@@ -18,10 +18,10 @@ self-contained in `wp-dev` and reproducible from this repo alone.
 
 ## Why there's a Containerfile here but no BuildConfig
 
-`hermes/Containerfile` is kept for provenance/reproducibility, not built by
-this repo's `deploy/apps/kustomization.yaml` (unlike `plant-api`, the MCP
-servers, and `waterplant-ui`, which all have BuildConfigs). The image is
-built and pushed manually — check `hermes/chart/values.yaml`'s `image.*` for
+`hermes/Containerfile` is kept for provenance/reproducibility. The image is
+built and pushed to quay, which is now how every component is deployed — this
+was the first one to work that way, back when the others still had on-cluster
+BuildConfigs in `deploy/apps/`. Check `hermes/chart/values.yaml`'s `image.*` for
 what's actually deployed, it will drift as the image gets rebuilt — and
 everything this deployment adds on top (MCP wiring, trimmed config, sandbox
 policy, the `hermes_otel` plugin) is injected at runtime onto the sandbox's

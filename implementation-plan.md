@@ -759,7 +759,7 @@ Answers needed before the phase noted.
 - **Cluster available now** — RHOAI 3.5 on **OCP 4.22**, carrying Model Gateway, MLflow, EvalHub, Guardrails, Garak, MCP Gateway TP and Agent Sandbox TP. Phases 0–2 build at full fidelity before 3.6, and the sandbox lifecycle can be spiked in October (§2.6).
 - **Dropping VM isolation is accepted.** Kata off the critical path; annotate planning.md (§2.3).
 - **MCP Gateway is per attendee**, not shared — a shared data plane would leak one attendee's denials into another's lab (§2.5).
-- **Development runs on-cluster**, no compose file in the repo (§2.6). Images build on-cluster via binary BuildConfigs, so no developer builds a container locally even before CI exists.
+- **Development runs on-cluster**, no compose file in the repo (§2.6). Images are built and pushed to `quay.io/rh-aiservices-bu` and every deployment pulls a published, pinned tag — one build, one digest, all ~30 tenants. *Revised from on-cluster binary BuildConfigs, which rebuilt the same source per namespace.*
 - **Model and tool-calling reliability.** `qwen3-235b` over LiteLLM, measured at 100% on the golden workflow across 14 scoreable runs. The Phase 0 gate is met and the model is not the risk (§2.9).
 - **Scenario 6's test value is 45%**, not 5% — physically harmless, outside the Operator's authorized band, and free of the model's own safety refusal (§2.9).
 - **Guardrails: both are available.** RHOAI 3.5 installs `guardrailsorchestrators` *and* `nemoguardrails` CRDs, so Phase 5 is a choice rather than a dependency.

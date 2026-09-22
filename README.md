@@ -211,17 +211,26 @@ exercise the real tool schemas and the real JSON that reaches the model.
 
 ## Building and deploying
 
-**Nothing is built locally, by anyone.** Images build on the cluster via binary
-BuildConfigs, which keeps the developer inner loop honest before CI exists and
-removes the whole class of arm64-laptop / amd64-cluster drift.
+**Images are built and pushed to `quay.io/rh-aiservices-bu`**, and every
+deployment pulls a published tag from there. Nothing builds on the cluster:
+one image is built once and the same digest runs for all ~30 tenants, instead
+of each namespace rebuilding from source. Build for **`linux/amd64`** explicitly
+— an arm64 laptop otherwise produces an image the cluster cannot run.
 
 ```bash
-for c in plant-api mcp-telemetry mcp-maintenance mcp-control; do
-  oc start-build "$c" --from-dir="$c" --follow -n <namespace>
+for c in plant-api mcp-telemetry mcp-maintenance mcp-control agent ui hermes; do
+  podman build --platform linux/amd64 \
+    -t "quay.io/rh-aiservices-bu/agentops-rh1-${c}:<tag>" "$c"
+  podman push "quay.io/rh-aiservices-bu/agentops-rh1-${c}:<tag>"
 done
-oc start-build waterplant-agent --from-dir=agent --follow -n <namespace>
-oc start-build waterplant-ui    --from-dir=ui    --follow -n <namespace>
 ```
+
+**Tag with something immutable** — a git SHA or a release version, never
+`:latest`. The standing rule is that nothing upgrades by itself, and a floating
+tag silently breaks that the next time a pod restarts mid-exercise.
+
+The binary BuildConfigs in [`deploy/apps/`](deploy/apps/) are the superseded
+on-cluster path, kept for reference until they are removed.
 
 Deployment manifests are **not** in this repo. They live in the
 `agentops-in-action-workshop` repo under `automation/gitops/tenant-platform`,
