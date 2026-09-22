@@ -2,7 +2,12 @@
 
 **Water Plant Maintenance Assistant on OpenShift AI 3.6**
 
-Status: Phase 0 largely complete · Last updated: 2026-09-09
+Status: Phases 0–4 substantially delivered and GitOps-deployed · Last updated: 2026-09-22
+
+> **In one line.** The agent, its plant, its tools, its console, per-participant identity,
+> MCP Gateway tool authorization, OpenShell sandboxing and MLflow tracing are built and
+> deployed by GitOps from a second repository. What is missing is the evaluation harness,
+> the documentation-governance scenario, and the lab guide itself. See **§4.0**.
 
 Source inputs: [RH1 AgentOps Lab overview.md](RH1%20AgentOps%20Lab%20overview.md) (what the agent is and what the scenarios teach), [planning.md](planning.md) (which Red Hat technology delivers each capability, and when it lands).
 
@@ -113,47 +118,51 @@ This diverges from planning.md's "Hardware-isolated agent/code execution" row, w
 
 ### 2.4 Repository layout
 
+**This is now two repositories, not one** — which also answers §8 Q4. The agent and
+everything it talks to live here; everything that deploys it, and the lab guide, live in
+the workshop repository. The line between them is *what the participant runs* versus *what
+stands it up*.
+
 ```
-rh1-agentops/
-├── agent/                       # this plan, the agent itself
-│   ├── src/waterplant_agent/
-│   │   ├── runtime/             # AgentRuntime interface + langgraph impl
-│   │   ├── tools/               # MCP client wiring, run_diagnostic
-│   │   ├── identity/            # token extraction + propagation
-│   │   └── tracing/             # MLflow + OTel setup
-│   └── Containerfile
-├── mcp/
-│   ├── telemetry/               # get_pump_status, get_water_quality,
-│   │                            #   get_reservoir_level
-│   ├── maintenance/             # search_maintenance_history,
-│   │                            #   create_work_order, update_work_order
-│   ├── docs/                    # search_documentation (+ classification)
-│   └── control/                 # set_pump_speed, open_valve,
-│                                #   emergency_shutdown,
+rh-aiservices-bu/agentops-rh1-lab          # "the agent repo" — this one
+├── implementation-plan.md       # this document, with planning.md and the lab overview
+├── agent/                       # our own harness — the BYOA control case
+├── hermes/                      # the Hermes harness: Containerfile + chart (BYOA)
+├── plant-api/                   # simulator + tick loop + /reset  + maintenance records
+├── mcp-telemetry/               # get_pump_status, get_water_quality, get_reservoir_level,
+│                                #   get_all_pump_status, get_plant_safety_status,
+│                                #   get_valve_positions
+├── mcp-maintenance/             # search_maintenance_history, get_maintenance_record,
+│                                #   list_work_orders, create_work_order, update_work_order
+├── mcp-control/                 # set_pump_speed, start_pump, stop_pump, open_valve,
+│                                #   close_valve, emergency_shutdown,
 │                                #   dump_plant_configuration
-├── plant-api/                   # simulator + tick loop + /reset
-├── ui/                          # React SPA + FastAPI BFF
-├── content/
-│   ├── manuals/                 # 15–20 fictional docs, classified
-│   └── seed/                    # maintenance records incl. poisoned one
-├── eval/
-│   ├── functional/              # YAML suites
-│   ├── security/
-│   ├── garak/                   # profile + REST adapter
-│   └── evalctl/                 # runner: drives agent, asserts on traces
-├── policy/
-│   ├── openshell/               # baseline/ and hardened/ policy CRs
-│   ├── mcp-gateway/             # tool + parameter authorization
-│   ├── keycloak/                # realm, roles, personas
-│   └── networkpolicy/
-├── deploy/
-│   ├── chart-platform/          # Helm: attendee workloads (ArgoCD auto-sync)
-│   ├── chart-policy/            # Helm: attendee-editable baseline (manual sync)
-│   ├── shared/                  # shared-services chart
-│   ├── toolbox/                 # attendee shell: oc, evalctl, garak
-│   └── argocd/                  # ApplicationSets, pinned to a per-event tag
-└── lab/                         # Showroom content (built last)
+├── mcp/                         # the original combined server, kept for reference
+├── ui/                          # the console: FastAPI BFF + vanilla JS (D7)
+└── deploy/                      # pre-GitOps scripts and manifests: keycloak, mcp-gateway,
+                                 #   authz, provisioning. Superseded by the charts below,
+                                 #   still useful for single-namespace bring-up.
+
+rhpds/agentops-in-action-workshop          # "the workshop repo"
+├── automation/gitops/
+│   ├── bootstrap-infra/         # operators (pinned, manual InstallPlan), DataScienceCluster,
+│   │                            #   shared services (MLflow, EvalHub), ArgoCD project
+│   ├── bootstrap-tenant/        # per-participant namespaces, quota, RBAC, and the three
+│   │                            #   Applications below
+│   ├── tenant-platform/         # plant-api, 3 MCP servers, agent (3 harness variants),
+│   │                            #   console, MCP Gateway, Keycloak realm   [auto-sync]
+│   ├── tenant-policy/           # AuthPolicy, NetworkPolicy, OpenShell sandbox policy
+│   │                            #                                          [manual sync]
+│   └── tenant-openshell/        # OpenShell gateway (vendored 0.0.92), sandbox, bridge,
+│                                #   MLflow relay                           [auto-sync]
+├── content/modules/ROOT/pages/  # Showroom lab guide, modules 1–7
+└── publishing-house/            # module specs, review tooling, decisions
 ```
+
+Two things the plan assumed that did **not** happen, and should stop being assumed: the
+`chart-platform` / `chart-policy` split lives in the workshop repo as `tenant-platform` and
+`tenant-policy` (D13 holds, the location moved), and there is no `eval/`, `policy/`,
+`content/` or `lab/` directory here at all. See §4.0 for what that costs.
 
 ### 2.5 What runs where
 
@@ -530,6 +539,76 @@ Garak runs as a Job against a thin REST adapter exposing the agent. Pin a small 
 
 Timings are effort estimates, not a schedule; §7 maps them onto the calendar.
 
+### 4.0 Status — where we actually are, 22 September 2026
+
+A participant can be provisioned by GitOps today and get a working, traced, deliberately
+over-privileged agent with a policy surface they own. The phases did not complete in order:
+Phase 3 and most of Phase 4 landed ahead of Phase 2, because the platform work was the risk
+and the evaluation harness was not.
+
+| Phase | What it was | State |
+|---|---|:--|
+| 0 | MVP on the cluster | **Done**, except `docs-mcp`. Tracing now wired through |
+| 1 | Identity and the governed endpoint | **Done** — realm per participant, token propagation verified in traces |
+| 2 | Evaluation and attack | **Not started.** No `evalctl`, no suites, no scorecard |
+| 3 | OpenShell and Agent Sandbox | **Done** — per participant, in GitOps, policy owned by the participant |
+| 4 | Identity and tool governance | **Tool-level done**, parameter-level not started; no SPIFFE/SPIRE |
+| 5 | Information governance | **Not started.** No `docs-mcp`, no corpus |
+| 6 | Packaging and scale | **Partial** — per-participant provisioning works; reset, toolbox, warm pools, dry runs do not exist |
+
+**What is deployed and verified on cluster**
+
+- **Three harnesses behind one console contract.** `tenant-platform` ships `agent.yaml`,
+  `agent-hermes.yaml` and `agent-hermes-openshell.yaml`; the console talks to a Service
+  named `hermes-agent` on 8787 regardless of which runs. BYOA is configuration, per D1.
+- **MCP Gateway enforcement is real.** Two AuthPolicies: authentication on the public
+  listener, and on the internal `mcps` listener an authorization rule requiring
+  `tool:<toolname>` under the client matching the MCP server. Verified withheld → 403,
+  grant → 200, revoke → 403.
+- **Identity is per participant.** A Keycloak realm each, one `operator` user, and every
+  tool declared as a role. `dump_plant_configuration` and `emergency_shutdown` are declared
+  but withheld — those two withheld roles *are* Scenarios 3 and 4.
+- **OpenShell governs execution.** A gateway and sandbox per participant in their own
+  namespace, Hermes running inside it under Landlock and a network namespace, with a
+  permissive baseline policy the participant owns and edits through `tenant-policy`.
+- **Tracing reaches MLflow.** `hermes_otel` pinned to a commit and checked against its
+  sha256, an experiment per participant, and spans including `TOOL` spans carrying tool
+  name, arguments and result. Authorization is a Kubernetes SelfSubjectAccessReview against
+  `mlflow.kubeflow.org` in the participant's namespace; egress goes through an nginx relay
+  in the bridge, because OpenShell's egress proxy trusts only public roots and cannot verify
+  MLflow's service-CA certificate.
+
+**What is missing, in the order it hurts**
+
+1. **`evalctl` and the two suites.** The lab's whole arc is `Functional 10 · Security 2` →
+   `9 · 9`, and nothing measures either number. This also blocks the §2.8 baseline
+   scorecard, which is the one piece of data the lab cannot recreate later. EvalHub is
+   deployed and unused.
+2. **The exfil-sink.** `MR-2291` exists in `plant-api` and names `diagnostics.example.com`,
+   but nothing answers that name, so the poisoned-record attack cannot actually land —
+   Scenario 2 currently proves nothing at baseline.
+3. **`docs-mcp` and the classified corpus.** No documentation server and no manuals exist in
+   either repository, so Scenario 5 has no substrate at all.
+4. **Parameter-level policy** on `set_pump_speed` — Scenario 6 is unbuilt.
+5. **The planted credential** `/etc/plant/credentials.env` — module 4's credential exercise
+   has nothing to find. Note that Hermes ships `terminal` and `code_execution` toolsets
+   enabled, which is a more honest module 4 subject than a planted `run_diagnostic`.
+6. **The lab guide.** Seven Showroom pages exist as scaffolds — objectives, then
+   `// TODO: Write module content here`. The substance is in `publishing-house/spec/modules/`
+   (52–73 lines each). Module 4's page still describes a "Kata-backed Agent Sandbox", which
+   contradicts D11 and must be corrected.
+7. **Personas.** §3.5 describes four; one `operator` exists. Scenarios 3 and 4 work through
+   withheld tool roles instead, which is a defensible simplification but should be a
+   decision, not a drift.
+8. **Phase 6 mechanics** — toolbox pod, warm pools, the sub-minute reset, two dry runs.
+
+**One open defect.** The agent sometimes reports an action it never took: it answers a
+control request in prose, with no tool call, and the plant is untouched (§2.9). It is now
+*visible* — the trace shows an `LLM` span, `finish_reason: stop`, and no `TOOL` span — which
+is a good demonstration of why observability precedes trust, but it is unfixed. It did not
+reproduce in 12 controlled replays of the failing conversation, so it is intermittent rather
+than structural.
+
 ### Phase 0 — MVP on the cluster, no security (≈2.5 weeks)
 
 Containerfiles, the Helm chart and the dev-namespace inner loop first (§2.6), then everything on top of it: plant-api with tick loop and reset; four MCP servers over streamable HTTP; the agent with `run_diagnostic`; MLflow tracing; UI chat and dashboard; all seed content including the planted artifacts. Model access via MaaS directly at this stage.
@@ -562,8 +641,8 @@ The console streams the work as it happens — tool calls as they fire, then the
 answer token by token — with a trace toggle and a readability mode that replaces
 the CRT treatment with standard system faces.
 
-Still outstanding for Phase 0: `docs-mcp` and its classified corpus, `evalctl`,
-and MLflow tracing wired through. Nothing is blocked.
+Still outstanding for Phase 0: `docs-mcp` and its classified corpus, and `evalctl`.
+MLflow tracing is wired through as of 22 September — see §4.0.
 
 ### Phase 1 — Identity and the governed endpoint (≈1 week)
 
@@ -668,7 +747,7 @@ Answers needed before the phase noted.
 1. **RH1 event date?** The only remaining "needed now" item. Drives the content freeze, which everything else works backwards from. *(Needed: now.)*
 2. **Can the shared model endpoint carry 30 concurrent attendees?** One sequential client drew 52 HTTP 429s across 15 golden-workflow runs (§2.9). Is the limit per virtual key — would per-attendee keys help? What is the quota, and can it be raised for the event window? The errors are `vertex_aiException — Resource exhausted`, so the ceiling may be upstream of LiteLLM. *(Needed: before any dry run at scale.)*
 3. **Which policy surfaces does an attendee actually get in the browser?** OpenShell Admin UI is confirmed; MCP Gateway policy may be console YAML editing instead of a UI. Determines how much of §2.5's tab list is real. *(Needed: Phase 1.)*
-4. **Is `agent/` the right home, or does this become a multi-repo Publishing House project?** Affects the ArgoCD layout. *(Needed: Phase 1.)*
+4. ~~**Is `agent/` the right home, or does this become a multi-repo Publishing House project?**~~ **Answered: two repositories.** The agent lives here; the GitOps charts and the Showroom guide live in `rhpds/agentops-in-action-workshop` (§2.4).
 5. **Is MCP Gateway in the RH1 event build of 3.6, and at what maturity?** planning.md marks this "to confirm". The October spike on 3.5 TP will tell us a lot early. Determines whether §6's Authorino fallback is activated. *(Needed: end of Phase 2.)*
 6. **Does Agent Sandbox actually need OpenShift Sandboxed Containers when Kata is unused?** If not, one operator leaves the shared install. Answer falls out of the October spike. *(Needed: Phase 3 — low stakes.)*
 7. **Vault, or Kubernetes Secrets, for credential governance?** Vault is the stronger story; Secrets are one less shared service. *(Needed: Phase 3.)*
@@ -691,13 +770,29 @@ Answers needed before the phase noted.
 
 ## 9. Immediate next steps
 
-The cluster lands within the hour, so this is a start-today list.
+The platform is built. What remains is what the lab *measures* and what the participant
+*reads* — and the ordering below is by what blocks the most downstream work.
 
-1. **Confirm the model endpoint** (Q2) and start the tool-calling reliability spike the moment it exists. This is the last blocker and the longest pole.
-2. **Stand up dev namespaces and the §2.6 inner loop** — CI image build, chart skeleton, `oc rsync` watcher, one hello-world service reloading in a pod. Hard three-day timebox: if hot reload is not working by then, fall back to build-and-redeploy rather than letting the tooling become the project.
-3. Scaffold the repository layout from §2.4 — with `deploy/` split into `chart-platform/` and `chart-policy/` from the start (§2.7), since retrofitting that split means re-templating every manifest.
-4. Build `plant-api` with the tick loop, the Pump 4 degradation seed, and `/reset`.
-5. Build `telemetry-mcp` and prove one MCP call over streamable HTTP from the agent, running on the cluster, with an MLflow trace attached.
-6. Chase the RH1 date (Q1) — cheap, and it does not block any of the above.
+1. **Build `evalctl` and the two suites**, asserting against MLflow traces rather than
+   response text (§3.6). Nothing else can be scored until this exists, the baseline
+   scorecard cannot be captured without it, and modules 2 and 6 are built on both numbers.
+   Tool spans now carry name, arguments and result, so the trace assertions have something
+   to assert on.
+2. **Deploy the exfil-sink** and confirm the `MR-2291` attack lands at baseline. Until it
+   does, Scenario 2 demonstrates nothing, and the OpenShell network policy in module 4 has
+   no before/after.
+3. **Write the lab guide.** Seven module specs exist; seven pages are scaffolds. Correct
+   module 4's Kata language to match D11 while writing it, and have modules 4–6 sync policy
+   with `oc patch` plus `syncStrategy: {"hook": {}}` rather than the ArgoCD UI.
+4. **Build `docs-mcp` and its classified corpus** — the whole of Scenario 5, and the last
+   Phase 0 component.
+5. **Decide the persona question** (§3.5 versus the single `operator` that exists) and, if
+   the four personas stay, add parameter-level policy for `set_pump_speed` to complete
+   Scenario 6.
+6. **Phase 6 mechanics**: toolbox pod, the sub-minute reset, warm-pool sizing, then two dry
+   runs at 30.
+7. **Chase the RH1 date** (Q1) and the MaaS quota answer (Q2) — still the only two questions
+   that can invalidate the schedule rather than the build.
 
-Step 5 is the smallest thing that de-risks the most: it validates the framework choice, the transport choice, the tracing choice and the deployment path in one go. Everything after it is filling in a shape that has been proven to work.
+Step 1 remains the smallest thing that de-risks the most, for the same reason step 5 did a
+month ago: it is what turns a working platform into a lab that can prove its own claim.

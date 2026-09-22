@@ -16,8 +16,10 @@ is the whole point.
 > around it are.
 
 Design decisions, phasing and open questions live in
-[`agent/implementation-plan.md`](agent/implementation-plan.md). Read that before
-making architectural changes — most of what looks arbitrary here is load-bearing.
+[`implementation-plan.md`](implementation-plan.md), alongside
+[`planning.md`](planning.md) and the
+[lab overview](RH1%20AgentOps%20Lab%20overview.md). Read the plan before making
+architectural changes — most of what looks arbitrary here is load-bearing.
 
 ---
 
@@ -70,7 +72,7 @@ warned. If you are moving these files, diff the tool descriptions afterwards.
 | [`mcp-telemetry/`](mcp-telemetry/) | Read-only instrumentation. 6 tools. |
 | [`mcp-maintenance/`](mcp-maintenance/) | History and work orders. 5 tools. |
 | [`mcp-control/`](mcp-control/) | Plant control, deliberately over-broad. 7 tools. |
-| [`agent/`](agent/) | The maintenance assistant, plus planning documents and the tool-calling reliability spike. |
+| [`agent/`](agent/) | The maintenance assistant we wrote, and the tool-calling reliability spike. With `agent.harness: hermes` the default, this is the BYOA control case — the harness a swap is measured against. |
 | [`ui/`](ui/) | The operator console: an industrial panel with analogue gauges and an amber CRT for the assistant. Its BFF also holds the harness adapter. |
 | [`hermes/`](hermes/) | Containerfile for the alternative harness — the cai-krew image plus the `[mcp]` extra it ships without. |
 | [`deploy/`](deploy/) | Keycloak, Kuadrant/Authorino auth and authz manifests for the identity exercises. |
@@ -258,9 +260,13 @@ of the golden workflow produces `WO-4417` again — the ID the lab guide names.
 
 ## Status
 
-Phase 0, largely complete. `plant-api`, the three MCP servers, the agent and the
-operator console are built, tested and running on the cluster, with the golden
-workflow verified end to end over real MCP.
+Phases 0–4 substantially delivered. `plant-api`, the three MCP servers, the
+agent and the operator console are built, tested and running on the cluster,
+with the golden workflow verified end to end over real MCP. Per-participant
+identity, MCP Gateway tool authorization, OpenShell sandboxing and MLflow
+tracing are deployed by GitOps from the `agentops-in-action-workshop` repo —
+[`implementation-plan.md`](implementation-plan.md) §4.0 has what is and is not
+done.
 
 The largest open risk is no longer the model — it is the **shared model
 endpoint**. One sequential client drew 52 HTTP 429s across 15 golden-workflow
@@ -268,8 +274,9 @@ runs, stretching a 10-second run to as much as 172 seconds once backoff was
 absorbing them. The lab runs 30 attendees concurrently against the same virtual
 key. Backoff hides it; it does not solve it.
 
-Still to build: `docs-mcp` and its corpus, `evalctl`, and MLflow tracing wired
-through.
+Still to build: `docs-mcp` and its corpus, `evalctl` with both suites, and the
+exfil-sink — without which `MR-2291` names a host that nothing answers, and the
+poisoned-record attack cannot land at baseline.
 
 ---
 
