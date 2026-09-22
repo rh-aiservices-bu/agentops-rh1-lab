@@ -56,7 +56,17 @@ These are the project owner's rules, not suggestions.
   and none is needed — RBAC matches the strings.
 - The authorizer **caches denials for 300s**. After granting RBAC, a retry inside
   that window still fails. Check RBAC with a SubjectAccessReview instead of
-  inferring from the API's answer.
+  inferring from the API's answer — and with an explicit `SubjectAccessReview`
+  object, not `oc auth can-i`: no CRD backs the group, so `can-i` cannot resolve
+  the resource type and answers **`no` even when access is granted**. A real SAR
+  against the same strings returns `allowed: true` and names the RoleBinding.
+- **Reading traces back** (the console links each turn to its own trace) needs
+  `get`/`list` on `experiments` — the `mlflow-operator-mlflow-integration`
+  ClusterRole carries it. Search is `POST /api/3.0/mlflow/traces/search`, whose
+  `locations` must be `[{"type":"MLFLOW_EXPERIMENT","mlflow_experiment":{...}}]`;
+  a bare experiment id returns `200 {}`, an empty result rather than an error.
+  Each trace carries `request_preview` — the user's message verbatim — which is
+  what makes matching a turn to its trace exact rather than a guess.
 - **Two different path prefixes.** OTLP ingest is `POST /v1/traces` at the server
   root; the REST API is under `/mlflow/api/2.0/mlflow/...`. Fetching a trace's
   spans needs `/mlflow/ajax-api/3.0/mlflow/traces/get?trace_id=...` — the

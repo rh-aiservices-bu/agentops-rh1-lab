@@ -449,6 +449,11 @@ body {
 .line.trace.call { color: var(--phos); text-shadow: 0 0 6px rgba(var(--phos-glow), .5); }
 .line.trace.ok   { color: var(--phos-dim); padding-left: 1.4em; }
 .line.trace.err  { color: #ff8b4a; padding-left: 1.4em; text-shadow: 0 0 8px rgba(255,107,42,.45); }
+/* A status line's link out (harness traces its tool calls elsewhere). Brighter
+   than the dim line carrying it so it reads as the thing to click, but still on
+   the phosphor palette — a default browser blue breaks the CRT. */
+.line.trace a { color: var(--phos); text-decoration: underline; text-underline-offset: 2px; }
+.line.trace a:hover { text-shadow: 0 0 6px rgba(var(--phos-glow), .5); }
 
 /* MCP trace switch, sitting in the assistant panel header. */
 /* Both header controls live in one flex row, anchored to the right of the

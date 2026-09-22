@@ -444,13 +444,25 @@ async function ask(event) {
     stick(chat, pinned);
   };
 
-  const trace = (cls, text) => {
+  const trace = (cls, text, link) => {
     if (!showTrace) return;
     const pinned = isPinned(chat);
     chat.querySelector(".cursor-line")?.remove();
     const el = document.createElement("p");
     el.className = `line trace ${cls}`;
     el.textContent = text;
+    // A status line can carry somewhere to go — the harness that cannot show a
+    // tool trace here traces it to MLflow instead. Appended as a real anchor so
+    // it is clickable; the href is our own config, never model output.
+    if (link?.href && link?.text) {
+      el.appendChild(document.createTextNode(" "));
+      const a = document.createElement("a");
+      a.href = link.href;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+      a.textContent = link.text;
+      el.appendChild(a);
+    }
     chat.appendChild(el);
     stick(chat, pinned);
     replyLine = null; // a tool call ends the current prose run
@@ -499,7 +511,7 @@ async function ask(event) {
         if (ev.type === "token") {
           write(ev.text);
         } else if (ev.type === "status") {
-          trace("dim", `· ${ev.message}`);
+          trace("dim", `· ${ev.message}`, ev.link);
         } else if (ev.type === "tool_call") {
           const args = Object.entries(ev.arguments || {})
             .map(([k, v]) => `${k}=${JSON.stringify(v)}`)

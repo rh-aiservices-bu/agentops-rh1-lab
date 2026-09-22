@@ -16,23 +16,33 @@ on this path the BFF substitutes a service credential and the caller's identity
 does not reach the agent. That is a real reduction in what the lab can
 demonstrate, not an implementation detail — see `identity_is_propagated`.
 
-**There is no tool trace.** Hermes runs its agent loop server-side and returns
-only the finished answer; the tool calls never cross the wire. The console's
-agent-trace panel therefore has nothing to render, which matters because module 6
-has participants debug an over-restrictive policy *from the trace*. Rather than
-show an empty panel that reads as a broken console, the stream opens with a
-status line saying so. The durable fix is tracing at the gateway, where it
-survives a harness swap; this module only has to be honest until that exists.
+**There is no tool trace on the wire.** Hermes runs its agent loop server-side
+and returns only the finished answer; the tool calls never cross the wire. The
+console's agent-trace panel therefore has nothing to render, which matters
+because module 6 has participants debug an over-restrictive policy *from the
+trace*. Rather than show an empty panel that reads as a broken console, the
+stream opens with a status line saying so.
+
+They are not lost, though — Hermes's `hermes_otel` plugin exports them to MLflow
+as `TOOL` spans. So the turn ends with a link to its *own* trace, resolved by
+`traces.py` after the answer, and falls back to MLflow's front door when the
+lookup cannot pin one. That is still a redirect rather than a fix: the
+participant leaves the console to read it. Rendering those spans in the panel is
+the next step, and tracing at the gateway — where it survives a harness swap —
+is the durable one.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
+
+from . import traces
 
 #: "waterplant" — our own agent, native event shape, caller's token forwarded.
 #: "openai" — any OpenAI-compatible server, currently Hermes.
@@ -46,11 +56,65 @@ AGENT_MODEL = os.environ.get("AGENT_MODEL", "hermes-agent")
 #: How many prior turns the console may replay. An unbounded transcript
 #: eventually walks into the model's context limit mid-workshop.
 MAX_HISTORY_TURNS = int(os.environ.get("AGENT_MAX_HISTORY_TURNS", "20"))
+#: Where this harness's spans land. `app.py` reads the same value for the header
+#: link; it is repeated here because the no-trace status line is only a dead end
+#: without somewhere to send the participant. Unset (no tracing wired) simply
+#: drops the link rather than offering a broken one.
+MLFLOW_URL = os.environ.get("MLFLOW_URL", "").strip()
 
+#: Only for a deployment with no trace lookup wired. Where the lookup *is*
+#: configured the turn ends with a link to its own trace, and opening with an
+#: explanation of an absence the participant is about to be handed the fix for
+#: is noise — so the line is not emitted at all.
 _NO_TRACE = (
-    "harness does not expose tool calls — plant readings below are the "
-    "ground truth for what it actually did"
+    "harness does not expose tool calls over the wire — plant readings below "
+    "are the ground truth for what it actually did"
 )
+#: Deliberately hedged. The harness on this path is Hermes today, whose
+#: `hermes_otel` plugin does export TOOL spans, but the protocol is "any
+#: OpenAI-compatible server" and a different one may trace nothing.
+_NO_TRACE_LINK = "look for this turn's tool calls in MLflow →"
+_NOT_INDEXED = "this turn's trace has not been indexed yet"
+_TRACE_FOUND = "tool calls for this turn were traced"
+_TRACE_FOUND_LINK = "open the trace →"
+
+
+def _no_trace_event() -> dict | None:
+    if traces.enabled():
+        return None
+    event: dict[str, Any] = {"type": "status", "message": _NO_TRACE}
+    if MLFLOW_URL:
+        event["link"] = {"href": MLFLOW_URL, "text": _NO_TRACE_LINK}
+    return event
+
+
+async def _trace_link_event(message: str, started_ms: int) -> dict | None:
+    """The turn's own trace, once the exporter has written it.
+
+    Emitted after the answer rather than before it because that is when the
+    trace exists: the plugin flushes at the end of the turn. Nothing is emitted
+    if it cannot be pinned to this exact turn — see `traces.find_trace`.
+    """
+    if not traces.enabled():
+        return None
+    found = await traces.find_trace(message, started_ms)
+    if not found:
+        # The turn happened; only the link is missing. Fall back to MLflow's
+        # front door rather than going silent, so the participant still knows
+        # where the tool calls went.
+        if MLFLOW_URL:
+            return {
+                "type": "status",
+                "message": _NOT_INDEXED,
+                "link": {"href": traces.root_url(), "text": _NO_TRACE_LINK},
+            }
+        return None
+    trace_id, experiment_id = found
+    return {
+        "type": "status",
+        "message": _TRACE_FOUND,
+        "link": {"href": traces.trace_url(trace_id, experiment_id), "text": _TRACE_FOUND_LINK},
+    }
 
 
 def identity_is_propagated() -> bool:
@@ -156,7 +220,11 @@ async def relay_stream(
             yield _sse({"type": "error", "detail": f"agent unreachable: {exc}"})
         return
 
-    yield _sse({"type": "status", "message": _NO_TRACE})
+    # Before the request, not after the answer: the trace is stamped with when
+    # the turn began, and a window opened afterwards can miss its own trace.
+    started_ms = int(time.time() * 1000)
+    if opening := _no_trace_event():
+        yield _sse(opening)
     try:
         async with client.stream("POST", target, json=body, headers=headers) as up:
             if up.status_code >= 400:
@@ -177,6 +245,8 @@ async def relay_stream(
                     yield _sse({"type": "error", "detail": f"unparseable reply: {raw[:400]}"})
                     return
                 yield _sse({"type": "token", "text": reply})
+                if link := await _trace_link_event(message, started_ms):
+                    yield _sse(link)
                 yield _sse({"type": "done", "steps": 0, "rateLimitRetries": 0})
                 return
 
@@ -220,4 +290,6 @@ async def relay_stream(
         yield _sse({"type": "error", "detail": f"agent unreachable: {exc}"})
         return
 
+    if link := await _trace_link_event(message, started_ms):
+        yield _sse(link)
     yield _sse({"type": "done", "steps": 0, "rateLimitRetries": 0})

@@ -217,17 +217,29 @@ one image is built once and the same digest runs for all ~30 tenants, instead
 of each namespace rebuilding from source. Build for **`linux/amd64`** explicitly
 — an arm64 laptop otherwise produces an image the cluster cannot run.
 
+The image name does not always match the directory — `ui` publishes as
+`waterplant-ui`, `hermes` as `waterplant-hermes` (read off a live namespace, not
+assumed):
+
 ```bash
-for c in plant-api mcp-telemetry mcp-maintenance mcp-control agent ui hermes; do
-  podman build --platform linux/amd64 \
-    -t "quay.io/rh-aiservices-bu/agentops-rh1-${c}:<tag>" "$c"
-  podman push "quay.io/rh-aiservices-bu/agentops-rh1-${c}:<tag>"
+for c in plant-api:plant-api \
+         mcp-telemetry:mcp-telemetry \
+         mcp-maintenance:mcp-maintenance \
+         mcp-control:mcp-control \
+         ui:waterplant-ui \
+         hermes:waterplant-hermes; do
+  dir="${c%%:*}"; img="${c##*:}"
+  podman build --platform linux/amd64 -t "quay.io/rh-aiservices-bu/${img}:<tag>" "$dir"
+  podman push "quay.io/rh-aiservices-bu/${img}:<tag>"
 done
 ```
 
-**Tag with something immutable** — a git SHA or a release version, never
-`:latest`. The standing rule is that nothing upgrades by itself, and a floating
-tag silently breaks that the next time a pod restarts mid-exercise.
+**Every deployment currently pulls `:latest`**, which means a pushed image
+reaches every participant namespace on the next pod restart — including
+mid-exercise, and including namespaces you did not intend to touch. Push a
+distinct tag and point one deployment at it when testing a change. Moving the
+lab off `:latest` to an immutable tag (a git SHA or a version) is the standing
+"pin every version" rule applied here, and has not been done yet.
 
 The binary BuildConfigs in [`deploy/apps/`](deploy/apps/) are the superseded
 on-cluster path, kept for reference until they are removed.

@@ -279,9 +279,18 @@ command fixes it. `oc` itself needs no such override.
   capped at the operator's own tool scope rather than full admin access,
   but still one shared identity for every chat through the UI, not real
   per-caller attribution.
-- **No tool-call trace.** Hermes's agent loop runs server-side inside
-  `hermes gateway run`; only the finished answer crosses the wire, so the
-  console's `agentTraceAvailable` reads `false` for this path.
+- **No tool-call trace *in the console*.** Hermes's agent loop runs
+  server-side inside `hermes gateway run`; only the finished answer crosses
+  the wire, so the console's `agentTraceAvailable` reads `false` for this
+  path. The calls themselves survive in MLflow via `hermes_otel`, and the
+  console now ends each turn with a link to that turn's own trace —
+  correlated on the trace's `request_preview`, which holds the user's message
+  verbatim (`ui/src/waterplant_ui/traces.py`). That needs the console's
+  ServiceAccount bound to `mlflow-operator-mlflow-integration` in the
+  participant's `-agentops` namespace, plus `MLFLOW_EXPERIMENT` in the UI's
+  env; without them the link degrades to MLflow's front door. Rendering the
+  spans in the trace panel, and tracing at the gateway where it would survive
+  a harness swap, are both still ahead.
 - **Single-tenant UI, per-participant backends.** `waterplant-ui` has one
   `AGENT_URL`; with Hermes provisioned per-participant, only one
   participant's Hermes can be the live target at a time.

@@ -21,8 +21,22 @@ from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
 from waterplant_ui import harness as _harness
+from waterplant_ui import traces as _traces
 
 REPLY = "Pump 4 is at 8.2 mm/s."
+
+_ENV_KEYS = (
+    "AGENT_PROTOCOL",
+    "AGENT_API_KEY",
+    "AGENT_MODEL",
+    "MLFLOW_URL",
+    "MLFLOW_EXPERIMENT",
+    "MLFLOW_EXPERIMENT_ID",
+    "MLFLOW_WORKSPACE",
+    "NAMESPACE",
+    "MLFLOW_TOKEN_FILE",
+    "MLFLOW_TRACE_LOOKUP_SECONDS",
+)
 
 
 def reload_with(monkeypatch, **env):
@@ -31,11 +45,16 @@ def reload_with(monkeypatch, **env):
     Both fixtures reload the *same* module, so a single test cannot hold both:
     the second reload rebinds the first's globals underneath it. Assert one
     protocol per test.
+
+    `traces` is reloaded first: `harness` holds a reference to the module
+    object, which reload mutates in place, so the order matters only for the
+    config the reload reads.
     """
-    for key in ("AGENT_PROTOCOL", "AGENT_API_KEY", "AGENT_MODEL"):
+    for key in _ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
+    importlib.reload(_traces)
     return importlib.reload(_harness)
 
 
@@ -46,6 +65,81 @@ def openai(monkeypatch):
         AGENT_PROTOCOL="openai",
         AGENT_API_KEY="server-key",
         AGENT_MODEL="hermes-agent",
+        MLFLOW_URL="https://mlflow.example/mlflow",
+    )
+
+
+@pytest.fixture
+def openai_untraced(monkeypatch):
+    """The same harness on a deployment with no tracing wired."""
+    return reload_with(
+        monkeypatch,
+        AGENT_PROTOCOL="openai",
+        AGENT_API_KEY="server-key",
+        AGENT_MODEL="hermes-agent",
+    )
+
+
+@pytest.fixture
+def openai_with_lookup(monkeypatch, tmp_path):
+    """Tracing wired *and* the console able to look a trace up in MLflow.
+
+    The stub MLflow replaces the module's client rather than being pointed at
+    over the network: `traces` deliberately builds its own client (the agent's
+    carries a certificate and a private CA), so there is no client to inject.
+    """
+    token = tmp_path / "token"
+    token.write_text("sa-token\n")
+    mod = reload_with(
+        monkeypatch,
+        AGENT_PROTOCOL="openai",
+        AGENT_API_KEY="server-key",
+        AGENT_MODEL="hermes-agent",
+        MLFLOW_URL="https://mlflow.example/mlflow",
+        MLFLOW_EXPERIMENT="user-d5h5b",
+        MLFLOW_WORKSPACE="user-d5h5b-agentops",
+        MLFLOW_TOKEN_FILE=str(token),
+        # Otherwise the not-found path polls for its full eight seconds.
+        MLFLOW_TRACE_LOOKUP_SECONDS="0",
+    )
+    return mod
+
+
+def mlflow_stub(previews: list[str]) -> httpx.AsyncClient:
+    """MLflow as deployed: get-by-name, then the 3.0 trace search."""
+
+    async def by_name(request):
+        return JSONResponse({"experiment": {"experiment_id": "2", "name": "user-d5h5b"}})
+
+    async def search(request):
+        body = await request.json()
+        # The structured `locations` shape is not optional — a bare experiment
+        # id returns 200 with no traces on the real server, which is the bug
+        # this assertion exists to catch.
+        loc = body["locations"][0]
+        assert loc["mlflow_experiment"]["experiment_id"] == "2"
+        assert "attributes.timestamp >" in body["filter"]
+        return JSONResponse(
+            {
+                "traces": [
+                    {
+                        "trace_id": f"tr-{i}",
+                        "request_preview": json.dumps(p),
+                        "request_time": "2026-09-22T17:07:23.190Z",
+                    }
+                    for i, p in enumerate(previews)
+                ]
+            }
+        )
+
+    app = Starlette(
+        routes=[
+            Route("/mlflow/api/2.0/mlflow/experiments/get-by-name", by_name, methods=["GET"]),
+            Route("/mlflow/api/3.0/mlflow/traces/search", search, methods=["POST"]),
+        ]
+    )
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app), base_url="https://mlflow.example"
     )
 
 
@@ -138,6 +232,86 @@ async def test_stream_translates_to_console_events(openai):
     # console: Hermes loops server-side, so the tool calls never cross the wire.
     assert "does not expose tool calls" in evs[0]["message"]
     assert "".join(e["text"] for e in evs if e["type"] == "token") == REPLY
+
+
+@pytest.mark.asyncio
+async def test_no_trace_status_links_to_mlflow(openai):
+    """The status line has to say where the tool calls went, not only that they
+    are absent — a participant sent to debug from a trace needs the redirect."""
+    async with stub(_streams) as client:
+        evs = await events(openai, client)
+    assert evs[0]["link"]["href"] == "https://mlflow.example/mlflow"
+    assert evs[0]["link"]["text"]
+
+
+@pytest.mark.asyncio
+async def test_turn_ends_with_a_link_to_its_own_trace(openai_with_lookup, monkeypatch):
+    """The point of the whole exercise: the trace the participant is told to
+    read, not MLflow's front door with 21 traces in it."""
+    mod = openai_with_lookup
+    monkeypatch.setattr(_traces, "_client", mlflow_stub(["someone else's turn", "why?"]))
+    async with stub(_streams) as client:
+        evs = await events(mod, client)
+
+    statuses = [e for e in evs if e["type"] == "status"]
+    # Exactly one status line: the link itself. Where a turn ends with its own
+    # trace, opening with an explanation of why the panel is empty is noise.
+    assert len(statuses) == 1
+    assert statuses[0]["link"]["href"] == (
+        "https://mlflow.example/mlflow/#/experiments/2/traces/tr-1"
+    )
+    # ... and it arrives before the turn is declared done.
+    assert evs[-1]["type"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_a_trace_that_cannot_be_pinned_falls_back_to_mlflow(
+    openai_with_lookup, monkeypatch
+):
+    """Linking the wrong turn's trace is worse than linking none: a participant
+    debugging a denial would read someone else's tool calls and believe them."""
+    mod = openai_with_lookup
+    monkeypatch.setattr(_traces, "_client", mlflow_stub(["a different question entirely"]))
+    async with stub(_streams) as client:
+        evs = await events(mod, client)
+
+    last = [e for e in evs if e["type"] == "status"][-1]
+    assert last["link"]["href"] == "https://mlflow.example/mlflow"
+    assert "not been indexed yet" in last["message"]
+
+
+@pytest.mark.asyncio
+async def test_lookup_failure_never_breaks_the_turn(openai_with_lookup, monkeypatch):
+    """MLflow being unreachable, or RBAC withheld, costs a link and nothing
+    else — the answer and the plant readings still arrive."""
+    mod = openai_with_lookup
+
+    async def refuses(request):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+
+    app = Starlette(
+        routes=[Route("/mlflow/api/2.0/mlflow/experiments/get-by-name", refuses, methods=["GET"])]
+    )
+    monkeypatch.setattr(
+        _traces,
+        "_client",
+        httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="https://mlflow.example"),
+    )
+    async with stub(_streams) as client:
+        evs = await events(mod, client)
+
+    assert "".join(e["text"] for e in evs if e["type"] == "token") == REPLY
+    assert evs[-1]["type"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_no_trace_status_omits_the_link_when_untraced(openai_untraced):
+    """No MLFLOW_URL means no tracing wired: say less rather than offer a link
+    that goes nowhere."""
+    async with stub(_streams) as client:
+        evs = await events(openai_untraced, client)
+    assert "does not expose tool calls" in evs[0]["message"]
+    assert "link" not in evs[0]
 
 
 @pytest.mark.asyncio

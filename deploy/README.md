@@ -26,10 +26,12 @@ oc new-project wp-dev
 
 ## Step 2 — Deploy the applications
 
-The five app components run from images published to `quay.io/rh-aiservices-bu`
-(`agentops-rh1-plant-api`, `-mcp-telemetry`, `-mcp-maintenance`, `-mcp-control`, `-ui`),
-each pinned to an immutable tag — never `:latest`. Building and pushing them is covered
-in the repo root README under "Building and deploying"; nothing is built on the cluster.
+The five app components run from images published to `quay.io/rh-aiservices-bu`:
+`plant-api`, `mcp-telemetry`, `mcp-maintenance`, `mcp-control` and `waterplant-ui`
+(note the last does not match its directory name, `ui/`). Building and pushing them is
+covered in the repo root README under "Building and deploying"; nothing is built on the
+cluster. They currently deploy as `:latest`, so a push reaches every participant
+namespace on the next restart — see that section before pushing.
 
 > **Superseded:** `deploy/apps/` still holds binary BuildConfigs from the earlier
 > on-cluster build path (`oc apply -k deploy/apps/`, then `oc start-build … --from-dir=`).
