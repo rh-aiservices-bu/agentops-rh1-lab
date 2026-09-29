@@ -2,8 +2,9 @@
 #
 # NOTE: this repo does not build this image. It is kept here for provenance
 # and reproducibility — see hermes/README.md for why, and how to rebuild it
-# if the pinned tag ever needs bumping. Check hermes/chart/values.yaml's
-# image.* for the tag actually deployed — update it after each rebuild.
+# if the pinned tag ever needs bumping. The tag actually deployed is set in
+# the workshop repo's tenant-platform chart (agent.hermes.image.*) — update
+# it there after each rebuild.
 #
 # Adapts the cai-krew Hermes container for OpenShell sandbox use.
 # Includes the RHRolun fork with the Slack extra installed (unused by this

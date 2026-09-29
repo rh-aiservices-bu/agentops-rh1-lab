@@ -1,1 +1,0 @@
-"""Water Plant Maintenance Assistant."""

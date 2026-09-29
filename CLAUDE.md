@@ -28,7 +28,7 @@ These are the project owner's rules, not suggestions.
 - **Nothing runs locally, for anyone.** Everything is on OpenShift AI. No compose
   file. Images are **built and pushed to `quay.io/rh-aiservices-bu`**, and every
   deployment pulls a published, pinned tag from there — not an on-cluster build.
-  The BuildConfigs still sitting in `deploy/apps/` are the superseded path.
+  This repo holds no BuildConfigs or other deployment manifests at all.
 - **Pin every version. No automatic upgrades.** Subscriptions get
   `installPlanApproval: Manual` and an explicit `startingCSV`; vendored charts and
   fetched tarballs are pinned to a version or commit and checked against a digest.

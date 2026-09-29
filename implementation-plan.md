@@ -127,7 +127,7 @@ stands it up*.
 rh-aiservices-bu/agentops-rh1-lab          # "the agent repo" — this one
 ├── implementation-plan.md       # this document, with planning.md and the lab overview
 ├── agent/                       # our own harness — the BYOA control case
-├── hermes/                      # the Hermes harness: Containerfile + chart (BYOA)
+├── hermes/                      # the Hermes harness: Containerfile only (BYOA)
 ├── plant-api/                   # simulator + tick loop + /reset  + maintenance records
 ├── mcp-telemetry/               # get_pump_status, get_water_quality, get_reservoir_level,
 │                                #   get_all_pump_status, get_plant_safety_status,
@@ -138,10 +138,7 @@ rh-aiservices-bu/agentops-rh1-lab          # "the agent repo" — this one
 │                                #   close_valve, emergency_shutdown,
 │                                #   dump_plant_configuration
 ├── mcp/                         # the original combined server, kept for reference
-├── ui/                          # the console: FastAPI BFF + vanilla JS (D7)
-└── deploy/                      # pre-GitOps scripts and manifests: keycloak, mcp-gateway,
-                                 #   authz, provisioning. Superseded by the charts below,
-                                 #   still useful for single-namespace bring-up.
+└── ui/                          # the console: FastAPI BFF + vanilla JS (D7)
 
 rhpds/agentops-in-action-workshop          # "the workshop repo"
 ├── automation/gitops/
