@@ -35,7 +35,7 @@ MLFLOW_URL = os.environ.get("MLFLOW_URL", "")
 # through the shared endpoint's 429s. A 30s timeout cut off healthy requests.
 TIMEOUT_S = float(os.environ.get("HTTP_TIMEOUT_S", "300"))
 
-# mTLS for OpenShell gateway service-relay URLs — see hermes/README.md.
+# mTLS for OpenShell gateway service-relay URLs — see hermes-openshell/README.md.
 AGENT_TLS_CA = os.environ.get("AGENT_TLS_CA", "")
 AGENT_TLS_CERT = os.environ.get("AGENT_TLS_CERT", "")
 AGENT_TLS_KEY = os.environ.get("AGENT_TLS_KEY", "")

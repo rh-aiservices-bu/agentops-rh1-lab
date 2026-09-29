@@ -1,0 +1,90 @@
+# Hermes Agent - UBI9 Container Image, plain (no sandbox)
+#
+# NOTE: this repo does not build this image. It is kept here for provenance
+# and reproducibility — see hermes-plain/README.md for why, and how to rebuild
+# it if the pinned tag ever needs bumping. Adapted from
+# cai-krew/hermes-container's plain `Containerfile` (this repo's
+# hermes-openshell/Containerfile is the OpenShell-sandboxed sibling, adapted
+# from that same source's `Containerfile.openshell`).
+#
+# Multi-stage: build deps, then slim runtime.
+#
+# Build:
+#   podman build --platform linux/amd64 -t hermes-plain:latest -f hermes-plain/Containerfile hermes-plain/
+
+FROM registry.access.redhat.com/ubi9/python-312:latest AS builder
+
+# Install build dependencies for Hermes CLI + native libs
+USER root
+RUN dnf install -y \
+    gcc \
+    git \
+    && dnf clean all
+
+WORKDIR /build
+
+# Clone Hermes Agent
+RUN git clone --depth 1 https://github.com/RHRolun/hermes-agent.git hermes-agent
+
+WORKDIR /build/hermes-agent
+
+# Create virtual environment and install Hermes
+RUN python -m venv /opt/hermes/venv
+ENV PATH="/opt/hermes/venv/bin:$PATH"
+RUN pip install --no-cache-dir ".[slack]" ".[mcp]"
+
+# Install common Python deps used by Hermes tools
+RUN pip install --no-cache-dir \
+    pyyaml \
+    faster-whisper \
+    opentelemetry-api \
+    opentelemetry-sdk \
+    opentelemetry-exporter-otlp-proto-http \
+    ddgs \
+    \
+    && rm -rf ~/.cache/pip
+
+# =====================================================================
+# Runtime stage
+# =====================================================================
+FROM registry.access.redhat.com/ubi9/python-312:latest
+
+# Runtime packages: curl for health checks, tini for PID 1
+USER root
+RUN dnf install -y \
+    git \
+    && dnf clean all \
+    && curl -Lo /usr/local/bin/tini https://github.com/krallin/tini/releases/download/v0.19.0/tini-amd64 \
+    && chmod +x /usr/local/bin/tini
+
+WORKDIR /app
+
+# Copy venv from builder
+COPY --from=builder /opt/hermes/venv /opt/hermes/venv
+
+# Ensure Hermes CLI is on PATH
+ENV PATH="/opt/hermes/venv/bin:$PATH"
+
+# Hermes home directory (where config.yaml, .env, state.db, sessions, etc. live)
+ENV HERMES_HOME=/app/.hermes
+ # Pre-create directory structure
+RUN mkdir -p /app/.hermes/{skills,sessions,logs,memories,cache,cache/models}
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -sf http://localhost:8787/health || exit 1
+
+# Expose port for web UI / health checks
+EXPOSE 8787
+
+# Volume for persistence (state.db, sessions, config, skills)
+VOLUME ["/app/.hermes"]
+
+# Drop back to non-root (required by OpenShift)
+USER 1001
+
+# Start with tini as PID 1 (handles signals properly)
+ENTRYPOINT ["/usr/local/bin/tini", "--"]
+
+# --verbose enables stderr logging so logs appear in `oc logs` / `kubectl logs`
+CMD ["hermes", "gateway", "run", "--verbose"]

@@ -1,4 +1,4 @@
-# hermes/ — Hermes agent, OpenShell-sandboxed
+# hermes-openshell/ — Hermes agent, OpenShell-sandboxed
 
 A second AI agent for this lab, alongside `agent/`. Where `agent/` is a
 purpose-built agent with an explicit tool-authorization contract (D8:
@@ -11,18 +11,23 @@ which is the point: it's the "how do you govern an agent you don't control
 the source of" half of the lab, as opposed to `agent/`'s "how do you build
 one safely from scratch" half.
 
+This is the **sandboxed ("boxed")** variant. [`hermes-plain/`](../hermes-plain/)
+is the same upstream agent built as a plain headless container with no
+OpenShell sandbox around it — see that directory's README for why both exist
+and how they differ.
+
 ## Why there's a Containerfile here but no build in CI
 
-`hermes/Containerfile` is kept for provenance/reproducibility, not built by
-this repo's CI. Like every other component, the image is built externally and
-pushed to `quay.io/rh-aiservices-bu` — the workshop repo's `tenant-platform`
+`hermes-openshell/Containerfile` is kept for provenance/reproducibility, not built
+by this repo's CI. Like every other component, the image is built externally
+and pushed to `quay.io/rh-aiservices-bu` — the workshop repo's `tenant-platform`
 chart pins the tag actually deployed (`agent.hermes.image.*`). Rebuild only if
 you need to bump a baked-in dependency, or when you change `hermes-agent`'s
 own source (the fork carries patches to its `_check_auth` and `mcp_tool.py` —
 see the workshop repo for what they do and why).
 
 ```bash
-podman build --platform linux/amd64 -t hermes-openshell:latest -f hermes/Containerfile hermes/
+podman build --platform linux/amd64 -t hermes-openshell:latest -f hermes-openshell/Containerfile hermes-openshell/
 podman push hermes-openshell:latest quay.io/rh-aiservices-bu/waterplant-hermes:<tag>
 ```
 

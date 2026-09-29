@@ -127,7 +127,8 @@ stands it up*.
 rh-aiservices-bu/agentops-rh1-lab          # "the agent repo" — this one
 ├── implementation-plan.md       # this document, with planning.md and the lab overview
 ├── agent/                       # our own harness — the BYOA control case
-├── hermes/                      # the Hermes harness: Containerfile only (BYOA)
+├── hermes-openshell/            # the Hermes harness, OpenShell-sandboxed: Containerfile only (BYOA)
+├── hermes-plain/                # same harness, no sandbox: Containerfile only, not deployed
 ├── plant-api/                   # simulator + tick loop + /reset  + maintenance records
 ├── mcp-telemetry/               # get_pump_status, get_water_quality, get_reservoir_level,
 │                                #   get_all_pump_status, get_plant_safety_status,

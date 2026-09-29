@@ -10,7 +10,7 @@ things learned the hard way that are expensive to re-derive.
 
 | Repo | Holds | Remote |
 |---|---|---|
-| **this one** | the agent and everything it talks to: `plant-api`, the three MCP servers, the console, our harness (`agent/`), Hermes (`hermes/`) | `rh-aiservices-bu/agentops-rh1-lab` |
+| **this one** | the agent and everything it talks to: `plant-api`, the three MCP servers, the console, our harness (`agent/`), Hermes (`hermes-openshell/`, `hermes-plain/`) | `rh-aiservices-bu/agentops-rh1-lab` |
 | **workshop** | everything that *deploys* it: five Helm charts in `automation/gitops/`, and the Showroom lab guide | `rhpds/agentops-in-action-workshop` |
 
 **Deployment manifests are not in this repo.** A change to how anything is deployed

@@ -1,7 +1,7 @@
 # Hermes Agent for OpenShell sandbox
 #
 # NOTE: this repo does not build this image. It is kept here for provenance
-# and reproducibility — see hermes/README.md for why, and how to rebuild it
+# and reproducibility — see hermes-openshell/README.md for why, and how to rebuild it
 # if the pinned tag ever needs bumping. The tag actually deployed is set in
 # the workshop repo's tenant-platform chart (agent.hermes.image.*) — update
 # it there after each rebuild.
@@ -15,7 +15,7 @@
 # executable in the default OpenShell Landlock policy.
 #
 # Build:
-#   podman build --platform linux/amd64 -t hermes-openshell:latest -f hermes/Containerfile hermes/
+#   podman build --platform linux/amd64 -t hermes-openshell:latest -f hermes-openshell/Containerfile hermes-openshell/
 #
 # Use in OpenShell:
 #   openshell sandbox create --name hermes --from hermes-openshell:latest
