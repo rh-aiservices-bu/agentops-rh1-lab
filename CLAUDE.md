@@ -10,7 +10,7 @@ things learned the hard way that are expensive to re-derive.
 
 | Repo | Holds | Remote |
 |---|---|---|
-| **this one** | the agent and everything it talks to: `plant-api`, the three MCP servers, the console, our harness (`agent/`), Hermes (`hermes/`) | `rh-aiservices-bu/agentops-rh1-lab` |
+| **this one** | the agent and everything it talks to: `plant-api`, the three MCP servers, the console, our harness (`agent/`), Hermes (`hermes-openshell/`, `hermes-plain/`) | `rh-aiservices-bu/agentops-rh1-lab` |
 | **workshop** | everything that *deploys* it: five Helm charts in `automation/gitops/`, and the Showroom lab guide | `rhpds/agentops-in-action-workshop` |
 
 **Deployment manifests are not in this repo.** A change to how anything is deployed
@@ -28,7 +28,7 @@ These are the project owner's rules, not suggestions.
 - **Nothing runs locally, for anyone.** Everything is on OpenShift AI. No compose
   file. Images are **built and pushed to `quay.io/rh-aiservices-bu`**, and every
   deployment pulls a published, pinned tag from there — not an on-cluster build.
-  The BuildConfigs still sitting in `deploy/apps/` are the superseded path.
+  This repo holds no BuildConfigs or other deployment manifests at all.
 - **Pin every version. No automatic upgrades.** Subscriptions get
   `installPlanApproval: Manual` and an explicit `startingCSV`; vendored charts and
   fetched tarballs are pinned to a version or commit and checked against a digest.

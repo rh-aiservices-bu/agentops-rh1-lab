@@ -74,8 +74,8 @@ warned. If you are moving these files, diff the tool descriptions afterwards.
 | [`mcp-control/`](mcp-control/) | Plant control, deliberately over-broad. 7 tools. |
 | [`agent/`](agent/) | The maintenance assistant we wrote, and the tool-calling reliability spike. With `agent.harness: hermes` the default, this is the BYOA control case — the harness a swap is measured against. |
 | [`ui/`](ui/) | The operator console: an industrial panel with analogue gauges and an amber CRT for the assistant. Its BFF also holds the harness adapter. |
-| [`hermes/`](hermes/) | Containerfile for the alternative harness — the cai-krew image plus the `[mcp]` extra it ships without. |
-| [`deploy/`](deploy/) | Keycloak, Kuadrant/Authorino auth and authz manifests for the identity exercises. |
+| [`hermes-openshell/`](hermes-openshell/) | A second agent, OpenShell-sandboxed — Containerfile only. Deployed by the `agentops-in-action-workshop` repo. |
+| [`hermes-plain/`](hermes-plain/) | Same agent, no sandbox — Containerfile only, not currently deployed. |
 
 Each MCP server is its own package, image and entrypoint, so a change to one
 does not redeploy the other two. All three speak **streamable HTTP, never
@@ -218,8 +218,9 @@ of each namespace rebuilding from source. Build for **`linux/amd64`** explicitly
 — an arm64 laptop otherwise produces an image the cluster cannot run.
 
 The image name does not always match the directory — `ui` publishes as
-`waterplant-ui`, `hermes` as `waterplant-hermes` (read off a live namespace, not
-assumed):
+`waterplant-ui`, `hermes-openshell` as `waterplant-hermes` (read off a live
+namespace, not assumed). `hermes-plain` is not currently deployed anywhere,
+but would publish as `waterplant-hermes-plain` if it ever is:
 
 ```bash
 for c in plant-api:plant-api \
@@ -227,7 +228,7 @@ for c in plant-api:plant-api \
          mcp-maintenance:mcp-maintenance \
          mcp-control:mcp-control \
          ui:waterplant-ui \
-         hermes:waterplant-hermes; do
+         hermes-openshell:waterplant-hermes; do
   dir="${c%%:*}"; img="${c##*:}"
   podman build --platform linux/amd64 -t "quay.io/rh-aiservices-bu/${img}:<tag>" "$dir"
   podman push "quay.io/rh-aiservices-bu/${img}:<tag>"
@@ -240,9 +241,6 @@ mid-exercise, and including namespaces you did not intend to touch. Push a
 distinct tag and point one deployment at it when testing a change. Moving the
 lab off `:latest` to an immutable tag (a git SHA or a version) is the standing
 "pin every version" rule applied here, and has not been done yet.
-
-The binary BuildConfigs in [`deploy/apps/`](deploy/apps/) are the superseded
-on-cluster path, kept for reference until they are removed.
 
 Deployment manifests are **not** in this repo. They live in the
 `agentops-in-action-workshop` repo under `automation/gitops/tenant-platform`,
