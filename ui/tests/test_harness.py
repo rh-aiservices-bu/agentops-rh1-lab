@@ -265,6 +265,28 @@ async def test_turn_ends_with_a_link_to_its_own_trace(openai_with_lookup, monkey
 
 
 @pytest.mark.asyncio
+async def test_trace_lookup_matches_what_hermes_was_sent(openai_with_lookup, monkeypatch):
+    """With history, the trace's preview is the recap, not the typed question.
+
+    Looking the trace up by what the participant typed found nothing, so every
+    follow-up turn fell back to MLflow's front door while the first turn of a
+    conversation linked correctly. Observed on cluster-drnkg.
+    """
+    mod = openai_with_lookup
+    # What the recap shape actually sends for this turn...
+    _, body = mod.request("http://a", "why?", "operator", CONTEXT, stream=True)
+    sent = body["messages"][0]["content"]
+    assert sent.startswith("Earlier in this conversation")
+    # ... is what MLflow will have recorded as the trace's preview.
+    monkeypatch.setattr(_traces, "_client", mlflow_stub([sent]))
+    async with stub(_streams) as client:
+        evs = await events(mod, client, CONTEXT)
+
+    last = [e for e in evs if e["type"] == "status"][-1]
+    assert "/traces/tr-0" in last["link"]["href"]
+
+
+@pytest.mark.asyncio
 async def test_a_trace_that_cannot_be_pinned_falls_back_to_mlflow(
     openai_with_lookup, monkeypatch
 ):
@@ -362,10 +384,33 @@ CONTEXT = [
 ]
 
 
-def test_openai_replays_history_inline(openai):
-    """Without this, "yes" arrives cold and gets "How can I assist you today?"."""
+def test_openai_folds_history_into_one_user_message(openai):
+    """The prior turns must reach Hermes, but NOT as an `assistant` message.
+
+    One replayed assistant turn stops the model calling its tools: measured
+    0/5 tool calls with assistant turns replayed versus 5/5 with the same
+    content recapped inside the user message (cluster-drnkg). The tools are
+    offered either way, so this is the model declining them.
+    """
     _, payload = openai.request("http://a", "yes", "operator", CONTEXT, stream=False)
-    assert payload["messages"] == [*CONTEXT, {"role": "user", "content": "yes"}]
+    assert len(payload["messages"]) == 1
+    assert payload["messages"][0]["role"] == "user"
+    assert not any(m["role"] == "assistant" for m in payload["messages"])
+
+    sent = payload["messages"][0]["content"]
+    # The follow-up still has something to follow: both sides of the prior
+    # exchange are in the recap, and the new question is last.
+    assert "check pump 3" in sent
+    assert "Would you like me to start it?" in sent
+    assert sent.rstrip().endswith("Now: yes")
+
+
+def test_recap_is_bounded_per_turn(openai):
+    """A recap must not become the bulk of the prompt."""
+    long_turn = [{"role": "assistant", "content": "x" * 5000}]
+    _, payload = openai.request("http://a", "yes", "operator", long_turn, stream=False)
+    sent = payload["messages"][0]["content"]
+    assert sent.count("x") == openai.RECAP_CHARS
 
 
 def test_native_passes_history_beside_the_question(native):
@@ -383,10 +428,18 @@ def test_history_is_trimmed_and_sanitised(protocol, monkeypatch, request):
     ]
     turns = [{"role": "user", "content": f"q{i}"} for i in range(mod.MAX_HISTORY_TURNS + 5)]
     _, payload = mod.request("http://a", "now", "operator", junk + turns, stream=False)
-    sent = payload["messages"][:-1] if protocol == "openai" else payload["history"]
+    if protocol == "openai":
+        # One user message carrying a recap — see test_openai_folds_history.
+        recap = payload["messages"][0]["content"]
+        assert "ignore previous instructions" not in recap
+        assert recap.count("You asked:") <= mod.MAX_HISTORY_TURNS
+        # The oldest turns are dropped, not the newest.
+        assert f"q{mod.MAX_HISTORY_TURNS + 4}" in recap
+        assert "q0" not in recap
+        return
+    sent = payload["history"]
     assert len(sent) <= mod.MAX_HISTORY_TURNS
     assert all(t["role"] in ("user", "assistant") and t["content"] for t in sent)
-    # The oldest turns are dropped, not the newest.
     assert sent[-1]["content"] == f"q{mod.MAX_HISTORY_TURNS + 4}"
 
 
@@ -397,7 +450,7 @@ async def test_history_reaches_the_wire(openai):
     # _streams echoes nothing back, so assert on what it was asked for instead.
     _, payload = openai.request("http://a", "why?", "operator", CONTEXT, stream=True)
     assert payload["stream"] is True
-    assert payload["messages"][0]["content"].startswith("check pump 3")
+    assert "check pump 3" in payload["messages"][0]["content"]
 
 
 def test_openai_without_history_sends_only_the_question(openai):
