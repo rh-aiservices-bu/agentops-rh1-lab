@@ -31,6 +31,22 @@ podman build --platform linux/amd64 -t hermes-openshell:latest -f hermes-openshe
 podman push hermes-openshell:latest quay.io/rh-aiservices-bu/waterplant-hermes:<tag>
 ```
 
+## Containerfile.cli — the participant's OpenShell CLI
+
+`Containerfile.cli` builds a small UBI image with the `openshell` CLI and an
+ssh client. It runs as the `cli` container in the workshop's
+`hermes-openshell-bridge` pod, where participants create the sandbox and start
+Hermes themselves; the bridge also copies `openshell` out of it for its own
+supervisor. The ssh client is what `openshell sandbox create`'s initial command
+and `openshell sandbox upload` need. Same build model as above; the deployed
+tag is `bridge.openshellCliImage` in the workshop repo's `tenant-openshell`
+chart.
+
+```bash
+podman build --platform linux/amd64 -t openshell-cli:0.1 -f hermes-openshell/Containerfile.cli hermes-openshell/
+podman push openshell-cli:0.1 quay.io/rh-aiservices-bu/openshell-cli:0.1
+```
+
 ## Where the rest of this lives
 
 Everything about how Hermes is actually deployed and configured — the

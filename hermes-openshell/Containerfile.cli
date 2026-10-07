@@ -1,0 +1,51 @@
+# OpenShell CLI image for the participant's `cli` container
+#
+# NOTE: this repo does not build this image. It is kept here for provenance
+# and reproducibility — see hermes-openshell/README.md. The tag actually
+# deployed is set in the workshop repo's tenant-openshell chart
+# (bridge.openshellCliImage) — update it there after each rebuild.
+#
+# Participants start Hermes in their OpenShell sandbox themselves, from a `cli`
+# container in the hermes-openshell-bridge pod. The bridge also copies the
+# openshell binary out of this image for its own supervisor, so neither
+# downloads it from GitHub at pod start.
+#
+# Why openssh-clients: `openshell sandbox create` runs its initial command over
+# ssh, and so does `openshell sandbox upload`. Without an ssh client, create
+# ends with a misleading "No such file or directory" (the sandbox is created
+# regardless) and upload fails outright. `openshell sandbox exec` and
+# `service expose` go through the gateway's API and need no ssh.
+#
+# The openshell CLI is a static musl binary. Keep its version in step with the
+# gateway: v0.0.88 is the CLI verified against the vendored 0.0.92 gateway.
+#
+# Build:
+#   podman build --platform linux/amd64 -t openshell-cli:0.1 -f hermes-openshell/Containerfile.cli hermes-openshell/
+#   podman push openshell-cli:0.1 quay.io/rh-aiservices-bu/openshell-cli:0.1
+
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+
+ARG OPENSHELL_VERSION=v0.0.88
+
+LABEL name="openshell-cli" \
+      summary="OpenShell CLI ${OPENSHELL_VERSION} with an ssh client, for the AgentOps lab"
+
+# ubi-minimal already ships bash and curl-minimal.
+RUN microdnf install -y \
+      openssh-clients \
+      tar \
+      gzip \
+      findutils \
+      procps-ng \
+    && microdnf clean all
+
+RUN curl -fsSL "https://github.com/NVIDIA/OpenShell/releases/download/${OPENSHELL_VERSION}/openshell-x86_64-unknown-linux-musl.tar.gz" \
+      | tar -xz -C /usr/local/bin openshell \
+    && chmod 0755 /usr/local/bin/openshell \
+    && openshell --version
+
+# OpenShift runs this with an arbitrary UID; HOME is set by the pod to a
+# writable emptyDir, where the CLI keeps its gateway config and ssh state.
+USER 1001
+
+CMD ["sleep", "infinity"]
