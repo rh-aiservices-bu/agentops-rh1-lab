@@ -16,9 +16,11 @@ on this path the BFF substitutes a service credential and the caller's identity
 does not reach the agent. That is a real reduction in what the lab can
 demonstrate, not an implementation detail — see `identity_is_propagated`.
 
-**There is no tool trace on the wire.** Hermes runs its agent loop server-side
-and returns only the finished answer; the tool calls never cross the wire. The
-console's agent-trace panel therefore has nothing to render, which matters
+**There is no tool trace in the OpenAI shape.** Hermes runs its agent loop
+server-side and the completion carries only the finished answer. (Its stream
+does add a non-standard `event: hermes.tool.progress` frame per tool call, seen
+on cluster-z5jhc; this module does not read it yet.) The console's agent-trace
+panel therefore has nothing to render, which matters
 because module 6 has participants debug an over-restrictive policy *from the
 trace*. Rather than show an empty panel that reads as a broken console, the
 stream opens with a status line saying so.
@@ -54,8 +56,14 @@ AGENT_API_KEY = os.environ.get("AGENT_API_KEY", "")
 #: value beyond requiring one, but a wrong name is a confusing 4xx.
 AGENT_MODEL = os.environ.get("AGENT_MODEL", "hermes-agent")
 #: How many prior turns the console may replay. An unbounded transcript
-#: eventually walks into the model's context limit mid-workshop.
+#: eventually walks into the model's context limit mid-workshop. Not applied
+#: when Hermes keeps the session: it trims its own transcript.
 MAX_HISTORY_TURNS = int(os.environ.get("AGENT_MAX_HISTORY_TURNS", "20"))
+#: Hermes loads the conversation from its own store when a request names it
+#: here, instead of taking history from the body. See `request` for why that
+#: matters. The store is the sandbox's state.db, so when the bridge recreates
+#: the sandbox an ongoing conversation silently starts over.
+SESSION_HEADER = "X-Hermes-Session-Id"
 #: Where this harness's spans land. `app.py` reads the same value for the header
 #: link; it is repeated here because the no-trace status line is only a dead end
 #: without somewhere to send the participant. Unset (no tracing wired) simply
@@ -126,13 +134,19 @@ def identity_is_propagated() -> bool:
     return PROTOCOL == "waterplant"
 
 
-def headers_for(caller_auth: str | None, *, sse: bool = False) -> dict[str, str]:
+def headers_for(
+    caller_auth: str | None, *, sse: bool = False, session_id: str | None = None
+) -> dict[str, str]:
     headers: dict[str, str] = {"accept": "text/event-stream"} if sse else {}
     if PROTOCOL == "openai":
         # The caller's token is dropped, not forwarded alongside: sending both
         # would imply an identity reaches the agent when none does.
         if AGENT_API_KEY:
             headers["authorization"] = f"Bearer {AGENT_API_KEY}"
+        # Hermes honours this only on an authenticated request, which is why
+        # it lives beside the server key.
+        if session_id:
+            headers[SESSION_HEADER] = session_id
     elif caller_auth:
         headers["authorization"] = caller_auth
     return headers
@@ -145,17 +159,30 @@ def request(
     history: list[dict[str, str]] | None = None,
     *,
     stream: bool,
+    session_id: str | None = None,
 ) -> tuple[str, dict]:
     """The (path, body) this harness expects for one turn.
 
-    Neither harness keeps session state, so the conversation is replayed on
-    every turn. Without it a follow-up lands with nothing to follow: "check
-    pump 3, make sure it's running" is answered and offers to start it, then
-    "yes" arrives cold and gets "Hello! How can I assist you today?"
+    A follow-up needs the conversation behind it: "check pump 3, make sure it's
+    running" is answered and offers to start it, then "yes" arrives cold and
+    gets "Hello! How can I assist you today?" Where that conversation comes
+    from differs per protocol, which is the reason this is a function and not a
+    template.
 
-    The two protocols want it in different places — an OpenAI server takes prior
-    turns inline in `messages`, ours takes them beside the new question — which
-    is the entire reason this is a function and not a template.
+    Our own agent keeps no session, so the console's transcript travels beside
+    the question.
+
+    Hermes keeps one, and with a `session_id` it must be left to: only the new
+    message is sent, and Hermes reloads the real transcript, tool calls and
+    results included. Replaying the console's transcript instead looks
+    equivalent and is not. In stateless mode Hermes keeps only role and content
+    from body history (gateway/platforms/api_server.py, chat completions), so
+    the model is shown earlier answers full of plant readings with no tool call
+    behind them, and copies that: it narrates the action, invents the result
+    and calls nothing. Measured on cluster-z5jhc, same two read-only turns, 4
+    runs each: the second turn called its tool 1/4 times replayed, 4/4 with the
+    session. Without a session id the replay remains, as the only option a
+    generic OpenAI server offers.
     """
     turns = [
         {"role": t["role"], "content": t["content"]}
@@ -163,9 +190,10 @@ def request(
         if t.get("role") in ("user", "assistant") and t.get("content")
     ]
     if PROTOCOL == "openai":
+        prior = [] if session_id else turns
         body: dict[str, Any] = {
             "model": AGENT_MODEL,
-            "messages": [*turns, {"role": "user", "content": message}],
+            "messages": [*prior, {"role": "user", "content": message}],
         }
         if stream:
             body["stream"] = True
@@ -204,10 +232,11 @@ async def relay_stream(
     persona: str,
     history: list[dict[str, str]] | None,
     caller_auth: str | None,
+    session_id: str | None = None,
 ) -> AsyncIterator[bytes]:
     """One turn as this console's server-sent events, whatever the harness is."""
-    target, body = request(url, message, persona, history, stream=True)
-    headers = headers_for(caller_auth, sse=True)
+    target, body = request(url, message, persona, history, stream=True, session_id=session_id)
+    headers = headers_for(caller_auth, sse=True, session_id=session_id)
 
     if PROTOCOL != "openai":
         # Native shape: the agent already emits these events, so relay raw and

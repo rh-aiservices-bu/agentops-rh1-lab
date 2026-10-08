@@ -362,8 +362,57 @@ CONTEXT = [
 ]
 
 
-def test_openai_replays_history_inline(openai):
-    """Without this, "yes" arrives cold and gets "How can I assist you today?"."""
+SESSION = "6f1c2a1e-0d5b-4a8e-9c3f-2b7d8e9a0c41"
+
+
+def test_openai_with_a_session_sends_only_the_new_message(openai):
+    """Hermes reloads the transcript itself, tool calls included.
+
+    Replaying the console's prose instead shows the model answers with no tool
+    call behind them, and it copies them: 1/4 second-turn tool calls replayed
+    against 4/4 with the session, on cluster-z5jhc.
+    """
+    _, payload = openai.request(
+        "http://a", "yes", "operator", CONTEXT, stream=False, session_id=SESSION
+    )
+    assert payload["messages"] == [{"role": "user", "content": "yes"}]
+
+
+def test_openai_session_rides_in_the_header(openai):
+    headers = openai.headers_for(None, session_id=SESSION)
+    assert headers[openai.SESSION_HEADER] == SESSION
+    assert openai.SESSION_HEADER not in openai.headers_for(None)
+
+
+def test_native_never_sends_the_session_header(native):
+    assert native.SESSION_HEADER not in native.headers_for("Bearer c", session_id=SESSION)
+
+
+@pytest.mark.asyncio
+async def test_session_reaches_the_wire(openai):
+    seen = {}
+
+    async def records(request):
+        seen["session"] = request.headers.get(openai.SESSION_HEADER)
+        seen["body"] = await request.json()
+        return await _streams(request)
+
+    async with stub(records) as client:
+        raw = b"".join(
+            [
+                c
+                async for c in openai.relay_stream(
+                    client, "http://stub", "why?", "operator", CONTEXT, None, SESSION
+                )
+            ]
+        )
+    assert b"8.2 mm/s" in raw
+    assert seen["session"] == SESSION
+    assert seen["body"]["messages"] == [{"role": "user", "content": "why?"}]
+
+
+def test_openai_without_a_session_falls_back_to_inline_replay(openai):
+    """The only option a generic OpenAI server offers."""
     _, payload = openai.request("http://a", "yes", "operator", CONTEXT, stream=False)
     assert payload["messages"] == [*CONTEXT, {"role": "user", "content": "yes"}]
 
@@ -407,3 +456,39 @@ def test_openai_without_history_sends_only_the_question(openai):
 
 def test_native_without_history_sends_an_empty_list(native):
     assert native.request("http://a", "hi", "operator", None, stream=False)[1]["history"] == []
+
+
+# --- the BFF ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", ["not-a-uuid", "x\r\nX-Injected: 1", "../../etc"])
+def test_conversation_id_must_be_a_uuid(bad):
+    """It ends up in a request header, so the BFF takes nothing else."""
+    from fastapi.testclient import TestClient
+
+    from waterplant_ui.app import app
+
+    res = TestClient(app).post("/api/chat", json={"message": "hi", "conversationId": bad})
+    assert res.status_code == 422
+
+
+def test_a_uuid_conversation_id_is_accepted():
+    from fastapi.testclient import TestClient
+
+    from waterplant_ui.app import app
+
+    res = TestClient(app).post("/api/chat", json={"message": "hi", "conversationId": SESSION})
+    # No agent is configured under test, so a valid request stops at 503.
+    assert res.status_code != 422
+
+
+@pytest.mark.parametrize("path", ["/", "/static/app.js"])
+def test_console_assets_are_revalidated(path):
+    """A stale app.js after a rollout silently drops the conversation id."""
+    from fastapi.testclient import TestClient
+
+    from waterplant_ui.app import app
+
+    res = TestClient(app).get(path)
+    assert res.status_code == 200
+    assert res.headers["cache-control"] == "no-cache"

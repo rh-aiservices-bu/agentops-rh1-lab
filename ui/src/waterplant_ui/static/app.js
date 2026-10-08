@@ -379,12 +379,19 @@ function addMessage(role, text) {
 
 /* The conversation, as the console remembers it.
  *
- * Nothing server-side keeps it: the BFF and the agent are both stateless, and
- * plant-api is deliberately the only stateful pod per participant. So the
- * transcript lives where it is already on screen, and is replayed with each
- * question. Without it a follow-up has nothing to follow — "check pump 3" is
- * answered and offers to start it, then "yes" arrives cold and is met with
- * "Hello! How can I assist you today?"
+ * Without it a follow-up has nothing to follow — "check pump 3" is answered and
+ * offers to start it, then "yes" arrives cold and is met with "Hello! How can I
+ * assist you today?" Which half of what follows is used depends on the harness
+ * behind the BFF, which the console does not need to know.
+ *
+ * `conversationId` names the conversation for a harness that keeps its own.
+ * Hermes does, with every tool call in it, and is sent only the id: replaying
+ * the on-screen text to it instead shows the model answers with no tool calls
+ * behind them, and it starts answering the same way (see harness.request in
+ * the BFF). One per page load, so a reload is a new conversation.
+ *
+ * `history` is the transcript as shown on screen, for our own agent, which is
+ * stateless and has it replayed with each question.
  *
  * Only what was actually said is kept. Trace lines and system errors are the
  * console's own narration and would read to the model as though the operator
@@ -393,6 +400,7 @@ function addMessage(role, text) {
  */
 const MAX_HISTORY_TURNS = 20;
 const history = [];
+const conversationId = crypto.randomUUID();
 
 function remember(role, content) {
   const text = (content || "").trim();
@@ -476,6 +484,7 @@ async function ask(event) {
         message,
         persona: $("persona").value,
         history: priorTurns,
+        conversationId,
       }),
     });
 
