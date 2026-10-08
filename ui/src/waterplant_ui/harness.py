@@ -138,6 +138,40 @@ def headers_for(caller_auth: str | None, *, sse: bool = False) -> dict[str, str]
     return headers
 
 
+#: How much of a prior reply to carry into the recap. Long enough to make a
+#: bare "yes" meaningful, short enough that the recap cannot become the bulk of
+#: the prompt. 150 chars per turn was enough for the follow-up cases we test.
+RECAP_CHARS = int(os.environ.get("AGENT_RECAP_CHARS", "150"))
+
+
+def _recap(turns: list[dict[str, str]], message: str) -> str:
+    """Prior turns folded into the new user message, as a short recap.
+
+    Why this exists, because it looks like pointless rewriting otherwise:
+    replaying a prior reply as an `assistant` message stops Hermes' model
+    calling tools at all. Measured on cluster-drnkg, same question, 5 runs per
+    shape — with assistant turns replayed, a tool call happened **0/5** times
+    and the model answered with invented readings; with the same content folded
+    into the user message as a recap, **5/5**. The model is offered all 22 MCP
+    tools either way (confirmed by capturing Hermes' outbound request), so this
+    is the model declining to use them, not Hermes withholding them.
+
+    Dropping history entirely also scores 5/5 but loses the follow-up — "check
+    pump 3, make sure it's running" then "yes" — which is the whole reason the
+    console replays anything. Sending only the user turns scores 5/5 and is
+    worse than either: with the old question present and no answer beside it,
+    the model answers *that* one again.
+    """
+    if not turns:
+        return message
+    lines = []
+    for t in turns:
+        who = "You asked" if t["role"] == "user" else "I replied"
+        text = " ".join(t["content"].split())[:RECAP_CHARS]
+        lines.append(f"{who}: {text}")
+    return "Earlier in this conversation —\n" + "\n".join(lines) + f"\n\nNow: {message}"
+
+
 def request(
     url: str,
     message: str,
@@ -155,7 +189,9 @@ def request(
 
     The two protocols want it in different places — an OpenAI server takes prior
     turns inline in `messages`, ours takes them beside the new question — which
-    is the entire reason this is a function and not a template.
+    is the entire reason this is a function and not a template. On the openai
+    path it is also *shaped* differently, and `_recap` explains why at length:
+    one `assistant` message is enough to stop the model using its tools.
     """
     turns = [
         {"role": t["role"], "content": t["content"]}
@@ -165,7 +201,7 @@ def request(
     if PROTOCOL == "openai":
         body: dict[str, Any] = {
             "model": AGENT_MODEL,
-            "messages": [*turns, {"role": "user", "content": message}],
+            "messages": [{"role": "user", "content": _recap(turns, message)}],
         }
         if stream:
             body["stream"] = True
@@ -223,6 +259,17 @@ async def relay_stream(
     # Before the request, not after the answer: the trace is stamped with when
     # the turn began, and a window opened afterwards can miss its own trace.
     started_ms = int(time.time() * 1000)
+    # Match the trace on what Hermes was actually SENT, not on what the
+    # participant typed. With history, `request` folds a recap into the user
+    # message, so the trace's own request_preview begins "Earlier in this
+    # conversation —" and a lookup by the typed question finds nothing. Caught
+    # on cluster-drnkg, where every follow-up turn fell back to MLflow's front
+    # door while the first turn of a conversation linked correctly.
+    sent = message
+    try:
+        sent = body["messages"][0]["content"] or message
+    except (KeyError, IndexError, TypeError):
+        pass
     if opening := _no_trace_event():
         yield _sse(opening)
     try:
@@ -245,7 +292,7 @@ async def relay_stream(
                     yield _sse({"type": "error", "detail": f"unparseable reply: {raw[:400]}"})
                     return
                 yield _sse({"type": "token", "text": reply})
-                if link := await _trace_link_event(message, started_ms):
+                if link := await _trace_link_event(sent, started_ms):
                     yield _sse(link)
                 yield _sse({"type": "done", "steps": 0, "rateLimitRetries": 0})
                 return
@@ -290,6 +337,6 @@ async def relay_stream(
         yield _sse({"type": "error", "detail": f"agent unreachable: {exc}"})
         return
 
-    if link := await _trace_link_event(message, started_ms):
+    if link := await _trace_link_event(sent, started_ms):
         yield _sse(link)
     yield _sse({"type": "done", "steps": 0, "rateLimitRetries": 0})
