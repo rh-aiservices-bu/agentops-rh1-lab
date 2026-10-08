@@ -107,16 +107,30 @@ These are the project owner's rules, not suggestions.
 - Hermes lists tools **once at startup** and never refreshes, so the bridge gates
   startup on the gateway having listed every server's tools.
 
-## Known open defect
+## The agent that reported actions it never took (cause found)
 
-The agent sometimes reports an action it never took — answers a control request in
-prose, emits no tool call, and the plant is untouched. In a trace it looks like: an
-`LLM` span, `finish_reason: stop`, **no `TOOL` span**, and no
-`hermes.turn.tool_count` on the `agent` span. It did not reproduce in 12 controlled
-replays of a known-failing conversation, so treat it as intermittent rather than
-structural. Do not "fix" it by adding prompt language telling the model to be
-honest — the prompt is not a policy surface here (see the README's subtlest-trap
-section).
+Symptom: a control request answered in prose — "Stopping pump 4... Result: stopped"
+— with no tool call and the plant untouched. In a trace: an `LLM` span,
+`finish_reason: stop`, **no `TOOL` span**, no `hermes.turn.tool_count`. Never on a
+conversation's first turn, which is why replaying one turn in isolation did not
+reproduce it.
+
+Cause: the console replayed its on-screen transcript to Hermes as plain
+`user`/`assistant` messages. Stateless, Hermes keeps only role and content from body
+history, so the model saw earlier answers full of plant readings with no tool call
+behind them, and imitated them — down to the `\n\n\n` seam where the console had
+joined two messages. Each invented answer was replayed in turn, reinforcing it.
+Hermes' own `state.db` held the true transcript the whole time, unused.
+
+Fix: the console sends a per-page conversation id as **`X-Hermes-Session-Id`** and
+only the new message; Hermes reloads the transcript with tool calls. Measured on
+cluster-z5jhc (user kdnn9), same two read-only turns ×4: second-turn tool calls
+1/4 replayed, 4/4 with the session. Sending a "better formatted" history does not
+help — both stateless endpoints strip `tool_calls` and `tool` messages. Caveat:
+sessions live in the sandbox's `state.db`, so a recreated sandbox restarts every
+conversation. Do not "fix" a recurrence with prompt language telling the model to
+be honest — the prompt is not a policy surface here (see the README's
+subtlest-trap section).
 
 ## Deliberate insecurity
 

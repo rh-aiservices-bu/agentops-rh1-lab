@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import ssl
+import uuid
 from pathlib import Path
 from typing import Any, Literal
 
@@ -22,7 +23,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import harness
 
@@ -111,14 +112,22 @@ class Turn(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     persona: str = "operator"
-    #: The conversation so far, sent by the console. Neither the BFF nor the
-    #: agent keeps session state; the transcript lives where it is already
-    #: rendered. See waterplant_ui.harness for how each protocol replays it.
+    #: The conversation so far, sent by the console. Our own agent keeps no
+    #: session, so this is how its follow-ups have something to follow. Hermes
+    #: does keep one and is given `conversation_id` instead — see
+    #: waterplant_ui.harness.request for why the replay must not reach it.
     history: list[Turn] = []
+    #: Names the conversation for a harness that keeps its own (Hermes). A UUID
+    #: by type, because it ends up in a request header.
+    conversation_id: uuid.UUID | None = Field(None, alias="conversationId")
 
 
 def _history(req: ChatRequest) -> list[dict[str, str]]:
     return [turn.model_dump() for turn in req.history]
+
+
+def _session(req: ChatRequest) -> str | None:
+    return str(req.conversation_id) if req.conversation_id else None
 
 
 @app.post("/api/chat")
@@ -145,9 +154,9 @@ async def chat(req: ChatRequest, request: Request) -> JSONResponse:
         )
 
     target, payload = harness.request(
-        AGENT_URL, req.message, req.persona, _history(req), stream=False
+        AGENT_URL, req.message, req.persona, _history(req), stream=False, session_id=_session(req)
     )
-    headers = harness.headers_for(request.headers.get("authorization"))
+    headers = harness.headers_for(request.headers.get("authorization"), session_id=_session(req))
 
     try:
         response = await client().post(target, json=payload, headers=headers)
@@ -167,12 +176,33 @@ async def chat(req: ChatRequest, request: Request) -> JSONResponse:
     return JSONResponse(body, status_code=response.status_code)
 
 
+#: See _RevalidatingStatic.
+_REVALIDATE = {"Cache-Control": "no-cache"}
+
+
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def index() -> HTMLResponse:
-    return HTMLResponse((STATIC / "index.html").read_text())
+    return HTMLResponse((STATIC / "index.html").read_text(), headers=_REVALIDATE)
 
 
-app.mount("/static", StaticFiles(directory=STATIC), name="static")
+class _RevalidatingStatic(StaticFiles):
+    """Static files the browser must check before reusing.
+
+    Served with only an ETag and Last-Modified, the console's JS was cached
+    heuristically and an ordinary reload kept running the old copy after a
+    rollout. Caught on cluster-z5jhc: the pod served the new app.js, the
+    browser still sent no conversationId, and Hermes fell back to replaying
+    prose. `no-cache` still lets the ETag answer 304, so it costs a round trip,
+    not a download.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers.update(_REVALIDATE)
+        return response
+
+
+app.mount("/static", _RevalidatingStatic(directory=STATIC), name="static")
 
 
 @app.post("/api/chat/stream")
@@ -202,6 +232,7 @@ async def chat_stream(req: ChatRequest, request: Request):
             req.persona,
             _history(req),
             request.headers.get("authorization"),
+            _session(req),
         ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
