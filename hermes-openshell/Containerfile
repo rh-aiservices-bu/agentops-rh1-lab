@@ -17,8 +17,10 @@
 # Build:
 #   podman build --platform linux/amd64 -t hermes-openshell:latest -f hermes-openshell/Containerfile hermes-openshell/
 #
-# Use in OpenShell:
-#   openshell sandbox create --name hermes --from hermes-openshell:latest
+# Use in OpenShell (see the workshop's tenant-openshell bridge for the full flow):
+#   openshell sandbox create --name hermie --from <this image> --no-tty -- true
+#   openshell sandbox upload hermie /hermes /sandbox
+#   openshell sandbox exec --name hermie -- start-hermes
 
 FROM quay.io/hmoghani/openshell-base:latest
 
@@ -64,24 +66,38 @@ RUN pip3.12 install --no-cache-dir \
 # MLflow tracing (Python SDK + kubernetes-namespaced auth for RHOAI)
 RUN pip3.12 install --no-cache-dir 'mlflow[kubernetes]>=3.12'
 
-# Start script: waits for the init script written by the setup Job, then starts Hermes.
-# Not invoked automatically by this Containerfile's own entrypoint — see README for
-# how provision-hermes-sandbox.sh starts `hermes gateway run` explicitly instead, via
-# `oc exec` (not this script). Left in the image in case someone wants an interactive
-# `openshell sandbox connect` session that starts Hermes the same way.
-RUN mkdir -p /opt/hermes && \
-    printf '#!/bin/sh\n\
-echo "[start.sh] Waiting for sandbox init script..."\n\
-for i in $(seq 1 60); do\n\
-    [ -f /sandbox/.sandbox-init.sh ] && break\n\
-    [ "$i" -eq 60 ] && echo "[start.sh] Timed out waiting for init script" && exit 1\n\
-    sleep 2\n\
-done\n\
-echo "[start.sh] Sourcing /sandbox/.sandbox-init.sh"\n\
-. /sandbox/.sandbox-init.sh\n\
-echo "[start.sh] Starting Hermes"\n\
-exec hermes\n\
-' > /opt/hermes/start.sh && chmod +x /opt/hermes/start.sh
+# Lab helpers, shared by every participant. Under /usr/local because OpenShell's
+# default filesystem policy lets the sandbox read /usr but not /opt.
+#
+#   start-hermes            (re)starts Hermes and its token refresher from the
+#                           participant's uploaded settings in /sandbox/hermes;
+#                           run by the participant, and by the workshop's
+#                           bridge when the operator's Keycloak roles change
+#   mcp-token-refresh.py    fetches and refreshes Hermes' MCP Gateway token
+#   plugins/hermes_otel     MLflow tracing plugin; start-hermes copies it into
+#                           $HERMES_HOME/plugins with the participant's config
+#
+# Only per-participant settings — keys, tokens, URLs — are uploaded at runtime.
+COPY start-hermes.sh /usr/local/bin/start-hermes
+COPY mcp-token-refresh.py /usr/local/share/hermes-lab/mcp-token-refresh.py
+RUN chmod 0755 /usr/local/bin/start-hermes && \
+    chmod 0644 /usr/local/share/hermes-lab/mcp-token-refresh.py
+
+# hermes_otel, pinned to a commit and checked against its digest, like every
+# other version in this lab. Release hermes-otel 1.13.0, 2026-09-22.
+ARG HERMES_OTEL_REPO=briancaffey/hermes-otel
+ARG HERMES_OTEL_COMMIT=a2afa2203e55f3bc261003f4f86fa01b62be32db
+ARG HERMES_OTEL_SHA256=b0b1c82011d0dbcbfeaa370cb9e74ffb7370c0fb42742f19824a37394e54c077
+RUN mkdir -p /usr/local/share/hermes-lab/plugins/hermes_otel && \
+    curl -fsSL -o /tmp/hermes-otel.tar.gz \
+      "https://github.com/${HERMES_OTEL_REPO}/archive/${HERMES_OTEL_COMMIT}.tar.gz" && \
+    echo "${HERMES_OTEL_SHA256}  /tmp/hermes-otel.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/hermes-otel.tar.gz --strip-components=2 \
+      -C /usr/local/share/hermes-lab/plugins/hermes_otel \
+      "${HERMES_OTEL_REPO##*/}-${HERMES_OTEL_COMMIT}/hermes_otel" && \
+    rm -f /tmp/hermes-otel.tar.gz && \
+    chmod -R a+rX /usr/local/share/hermes-lab && \
+    test -f /usr/local/share/hermes-lab/plugins/hermes_otel/__init__.py
 
 # Verify install
 RUN hermes --version
