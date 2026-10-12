@@ -878,6 +878,41 @@ async def test_a_releasable_shutdown_is_cleared_and_the_probe_proceeds(monkeypat
     assert live["shutdown_active"] is False
 
 
+@pytest.mark.asyncio
+async def test_trace_lookup_waits_for_the_exporter_then_gives_up(monkeypatch):
+    """The sweep's traces are rarely there the instant it finishes.
+
+    hermes_otel batches and flushes on session end, which is not when the HTTP
+    reply lands: a sweep whose five turns were all traced resolved none of them
+    six seconds later and all five a minute after that. Returns early once
+    everything is found, and returns what it has at the deadline rather than
+    failing a sweep that otherwise ran fine.
+    """
+    from waterplant_ui.probes import mlflow_run
+
+    monkeypatch.setattr(mlflow_run, "TRACE_LOOKUP_SECONDS", 1.0)
+    monkeypatch.setattr(mlflow_run, "TRACE_LOOKUP_INTERVAL_S", 0.01)
+
+    calls = {"n": 0}
+
+    async def flaky(_client, _experiment_id, sessions):
+        calls["n"] += 1
+        # Nothing exported yet on the first two polls.
+        return {} if calls["n"] < 3 else {s: f"tr-{s}" for s in sessions}
+
+    monkeypatch.setattr(mlflow_run, "find_traces_by_session", flaky)
+    found = await mlflow_run._await_traces(None, "7", {"s1", "s2"})
+    assert found == {"s1": "tr-s1", "s2": "tr-s2"}
+    assert calls["n"] == 3, "should stop polling as soon as all are resolved"
+
+    # Never arriving costs the links, not the sweep.
+    async def never(_client, _experiment_id, _sessions):
+        return {}
+
+    monkeypatch.setattr(mlflow_run, "find_traces_by_session", never)
+    assert await mlflow_run._await_traces(None, "7", {"s1"}) == {}
+
+
 # -- the event cursor --------------------------------------------------------
 
 

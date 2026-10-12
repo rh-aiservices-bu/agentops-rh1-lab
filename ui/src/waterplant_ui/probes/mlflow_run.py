@@ -64,8 +64,17 @@ EXPERIMENT = os.environ.get("MLFLOW_EXPERIMENT") or os.environ.get(
     "MLFLOW_CYCLE_EXPERIMENT", ""
 )
 NAMESPACE = os.environ.get("NAMESPACE", "")
-#: How long to let the span exporter flush before looking for the traces.
-TRACE_SETTLE_SECONDS = float(os.environ.get("PROBE_TRACE_SETTLE_S", "6"))
+#: How long to keep looking for the sweep's traces before giving up, and how
+#: often to re-check.
+#:
+#: A single short sleep does not work. hermes_otel batches spans and flushes
+#: on session end, and "session end" is not the moment the HTTP reply lands:
+#: a sweep whose five turns were all traced still resolved none of them six
+#: seconds later, and all five were present a minute after that. Polling costs
+#: nothing when the traces are already there — the loop exits on the first
+#: complete match — and recovers the common case where they are not.
+TRACE_LOOKUP_SECONDS = float(os.environ.get("PROBE_TRACE_LOOKUP_S", "75"))
+TRACE_LOOKUP_INTERVAL_S = float(os.environ.get("PROBE_TRACE_INTERVAL_S", "5"))
 
 _TOKEN_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 #: Mounted from the mlflow-service-ca ConfigMap. MLflow is served with an
@@ -176,6 +185,32 @@ async def find_traces_by_session(
         if session in sessions:
             found[session] = trace.get("trace_id", "")
     return found
+
+
+async def _await_traces(
+    client: httpx.AsyncClient, experiment_id: str, sessions: set[str]
+) -> dict[str, str]:
+    """Wait for the sweep's traces to land, returning whatever arrived.
+
+    Gives up at the deadline rather than failing: a sweep that ran is a sweep
+    that counts, and a missing link costs a link. Returns early as soon as
+    every session has a trace, so a deployment where the exporter is prompt
+    pays nothing for this.
+    """
+    if not sessions:
+        return {}
+    deadline = time.monotonic() + TRACE_LOOKUP_SECONDS
+    found: dict[str, str] = {}
+    while True:
+        found = await find_traces_by_session(client, experiment_id, sessions)
+        if len(found) == len(sessions) or time.monotonic() >= deadline:
+            if len(found) < len(sessions):
+                log.info(
+                    "eval sweep: %d of %d traces resolved before the deadline",
+                    len(found), len(sessions),
+                )
+            return found
+        await asyncio.sleep(TRACE_LOOKUP_INTERVAL_S)
 
 
 async def log_eval_sweep(
