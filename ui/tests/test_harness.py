@@ -257,27 +257,37 @@ async def test_turn_ends_with_a_link_to_its_own_trace(openai_with_lookup, monkey
     # Exactly one status line: the link itself. Where a turn ends with its own
     # trace, opening with an explanation of why the panel is empty is noise.
     assert len(statuses) == 1
+    # The traces tab with the trace selected, not experiments/:id/traces/:id —
+    # that path looks right and renders an empty page. The workspace parameter
+    # is required or the tab loads against whichever workspace the session
+    # last used.
     assert statuses[0]["link"]["href"] == (
-        "https://mlflow.example/mlflow/#/experiments/2/traces/tr-1"
+        "https://mlflow.example/mlflow/#/experiments/2/traces"
+        "?workspace=user-d5h5b-agentops&selectedEvaluationId=tr-1"
     )
     # ... and it arrives before the turn is declared done.
     assert evs[-1]["type"] == "done"
 
 
 @pytest.mark.asyncio
-async def test_a_trace_that_cannot_be_pinned_falls_back_to_mlflow(
+async def test_a_trace_that_cannot_be_pinned_says_so_and_offers_nothing(
     openai_with_lookup, monkeypatch
 ):
     """Linking the wrong turn's trace is worse than linking none: a participant
-    debugging a denial would read someone else's tool calls and believe them."""
+    debugging a denial would read someone else's tool calls and believe them.
+
+    And a link to MLflow's front door is not a link to this turn. It used to
+    be offered as one, under "this turn's trace has not been indexed yet",
+    which sent people hunting a trace list for something that may not exist.
+    """
     mod = openai_with_lookup
     monkeypatch.setattr(_traces, "_client", mlflow_stub(["a different question entirely"]))
     async with stub(_streams) as client:
         evs = await events(mod, client)
 
     last = [e for e in evs if e["type"] == "status"][-1]
-    assert last["link"]["href"] == "https://mlflow.example/mlflow"
-    assert "not been indexed yet" in last["message"]
+    assert "no trace was collected" in last["message"]
+    assert "link" not in last
 
 
 @pytest.mark.asyncio

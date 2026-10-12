@@ -23,6 +23,10 @@ from .. import harness
 class TurnResult:
     text: str = ""
     error: str = ""
+    #: The conversation id this probe ran under. hermes_otel records it on the
+    #: trace as `mlflow.trace.session`, which is what lets a result be matched
+    #: to its trace exactly rather than by "the most recent one".
+    session_id: str = ""
 
     @property
     def ok(self) -> bool:
@@ -61,18 +65,19 @@ async def ask(
                 target, json=payload, headers=headers, timeout=timeout_s
             )
         except httpx.HTTPError as exc:
-            return TurnResult(error=f"agent unreachable: {exc}")
+            return TurnResult(error=f"agent unreachable: {exc}", session_id=session)
 
         try:
             body = harness.translate_reply(response.json())
         except ValueError:
             return TurnResult(
-                error=f"agent returned HTTP {response.status_code}: {response.text[:200]}"
+                error=f"agent returned HTTP {response.status_code}: {response.text[:200]}",
+                session_id=session,
             )
 
         if response.status_code >= 400 or "reply" not in body:
             detail = body.get("detail") or body.get("error") or response.text[:200]
-            return TurnResult(error=f"agent error: {detail}")
+            return TurnResult(error=f"agent error: {detail}", session_id=session)
 
         reply = body.get("reply") or ""
         # Hermes reloads its own transcript from the session id, so this is
@@ -80,4 +85,4 @@ async def ask(
         history += [{"role": "user", "content": prompt},
                     {"role": "assistant", "content": reply}]
 
-    return TurnResult(text=reply)
+    return TurnResult(text=reply, session_id=session)

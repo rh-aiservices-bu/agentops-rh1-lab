@@ -338,7 +338,15 @@ async function poll() {
     (events || []).forEach(handleProbeEvent);
     setProbeButtons(!probesBusy);
 
-    $("conn").textContent = `live · tick ${plant.tick}`;
+    /* Nothing to say while the plant is answering. This used to read
+     * "live · tick 3927", which counted simulator ticks — a number with no
+     * meaning to a participant, sitting in the most prominent row on the
+     * page. The live lamp beside it already says the poll is landing.
+     *
+     * The element stays, because it is where the opposite case is reported:
+     * when plant-api stops answering, the catch below puts the reason here.
+     */
+    $("conn").textContent = "";
     $("conn").className = "tick";
   } catch (err) {
     $("conn").textContent = `plant unreachable — ${err.message}`;
@@ -362,8 +370,6 @@ async function poll() {
  *                pass, and rendering it as one would be the single most
  *                dangerous thing this panel could do.
  */
-
-const TOAST_DISMISS_MS = 14000;
 
 /* Live toasts by case id, so a `resolved` event updates the toast its
  * `started` event raised rather than stacking a second one beside it. */
@@ -390,7 +396,13 @@ const OUTCOME = {
 /* A toast is a shell — a dismiss button and a body — built once. The render
  * functions rewrite only the body, so the close button keeps its listener
  * across the started -> resolved transition instead of being re-bound on
- * every repaint. */
+ * every repaint.
+ *
+ * Nothing expires on a timer. An attack that lands while someone is reading
+ * the transcript, or an eval scorecard that arrives while they are looking at
+ * the plant, is exactly the result they most need to see — and a result that
+ * removes itself after a few seconds is one they will miss. They go when
+ * dismissed and not before. */
 function toastEl(key) {
   let el = liveToasts.get(key);
   if (el && el.isConnected) return el;
@@ -401,20 +413,8 @@ function toastEl(key) {
     'title="Dismiss">&times;</button><div class="t-body"></div>';
 
   el.querySelector(".t-close").addEventListener("click", (e) => {
-    // Without this the click bubbles to the pin handler below and the toast
-    // pins itself on its way out.
     e.stopPropagation();
     dismissToast(el);
-  });
-
-  /* Clicking the body pins. An attack that got through is exactly the one
-   * someone wants to read twice, and it is also the one most likely to arrive
-   * while they are looking somewhere else. Dismissal is the × rather than the
-   * body, so that reading a result can never destroy it by accident. */
-  el.addEventListener("click", () => {
-    el.classList.toggle("pinned");
-    if (el.classList.contains("pinned")) clearTimeout(el._timer);
-    else scheduleDismiss(el);
   });
 
   $("toasts").prepend(el);
@@ -425,24 +425,12 @@ function toastEl(key) {
 /* Where the render functions write. */
 const toastBody = (el) => el.querySelector(".t-body");
 
-/* Dismiss now, pinned or not. The × means "go away", so it has to beat the
- * pin — a pinned eval scorecard is otherwise unclosable, since pinning also
- * cancels the timer that would have removed it. */
 function dismissToast(el) {
-  clearTimeout(el._timer);
   el.classList.add("leaving");
   setTimeout(() => {
     el.remove();
     for (const [k, v] of liveToasts) if (v === el) liveToasts.delete(k);
   }, 300);
-}
-
-function scheduleDismiss(el, ms = TOAST_DISMISS_MS) {
-  clearTimeout(el._timer);
-  el._timer = setTimeout(() => {
-    if (el.classList.contains("pinned")) return;
-    dismissToast(el);
-  }, ms);
 }
 
 function handleProbeEvent(ev) {
@@ -466,7 +454,6 @@ function handleProbeEvent(ev) {
         <span class="t-sev ${esc(ev.severity)}">${esc(ev.severity)}</span></div>
       <div class="t-title">${esc(ev.title)}</div>
       <div class="t-blurb">${esc(ev.blurb)}</div>`;
-    clearTimeout(el._timer);
     return;
   }
 
@@ -497,9 +484,6 @@ function handleProbeEvent(ev) {
     <div class="t-blurb">${esc(ev.blurb)}</div>
     ${ev.detail ? `<div class="t-detail">${esc(ev.detail)}</div>` : ""}
     ${cleanupLine}`;
-  /* A successful attack stays up longer than a blocked one. It is the result
-   * that calls for action. */
-  scheduleDismiss(el, ev.outcome === "got_through" ? TOAST_DISMISS_MS * 2 : TOAST_DISMISS_MS);
 }
 
 function handleEvalEvent(ev) {
@@ -512,7 +496,6 @@ function handleEvalEvent(ev) {
       <div class="t-hd"><span class="t-mark spin">◴</span>
         <span class="t-kind">Running evaluations</span></div>
       <div class="t-blurb">${esc(ev.total)} evals against the agent — this takes a minute.</div>`;
-    clearTimeout(el._timer);
     return;
   }
 
@@ -520,8 +503,14 @@ function handleEvalEvent(ev) {
   const rows = (ev.results || [])
     .map((r) => {
       const o = OUTCOME[r.outcome] || OUTCOME.inconclusive;
+      /* Each eval links to its own trace. MLflow's Evaluations tab on the run
+       * cannot show these — see probes/mlflow_run.py — so the scorecard is
+       * where the connection is made. */
+      const link = r.traceUrl
+        ? ` <a class="t-trace" href="${esc(r.traceUrl)}" target="_blank" rel="noopener">trace →</a>`
+        : "";
       return `<li class="${o.cls}"><span class="m">${o.mark}</span>
-        <span class="n">${esc(r.title)}</span>
+        <span class="n">${esc(r.title)}${link}</span>
         <span class="d">${esc(r.detail)}</span></li>`;
     })
     .join("");
@@ -539,10 +528,6 @@ function handleEvalEvent(ev) {
         ? `<a class="t-link" href="${esc(ev.mlflowRunUrl)}" target="_blank" rel="noopener">Open the MLflow run →</a>`
         : `<div class="t-detail">No MLflow run recorded — tracking is not configured here.</div>`
     }`;
-  /* Pinned from the start: a scorecard someone asked for should not evaporate
-   * while they are still reading which eval failed. */
-  el.classList.add("pinned");
-  clearTimeout(el._timer);
 }
 
 function setProbeButtons(enabled) {
@@ -559,7 +544,6 @@ function toastNotice(key, cls, title, detail) {
   body.innerHTML = `<div class="t-hd"><span class="t-mark">!</span>
       <span class="t-kind">${esc(title)}</span></div>
     <div class="t-blurb">${esc(detail)}</div>`;
-  scheduleDismiss(el);
 }
 
 async function resetPlant() {
@@ -925,6 +909,18 @@ async function ask(event) {
         "state — including any control action taken against it."
     );
   }
+
+  /* Keep the toast stack clear of the masthead. Measured rather than guessed:
+   * the header's height changes with --ui-scale and with the viewport, and a
+   * hardcoded offset would either overlap it or float below a gap. */
+  const trackMastHeight = () => {
+    const mast = document.querySelector(".mast");
+    if (!mast) return;
+    const r = mast.getBoundingClientRect();
+    document.documentElement.style.setProperty("--mast-h", `${Math.round(r.bottom)}px`);
+  };
+  trackMastHeight();
+  addEventListener("resize", trackMastHeight);
 
   $("run-attack").addEventListener("click", runRandomAttack);
   $("run-evals").addEventListener("click", runEvals);

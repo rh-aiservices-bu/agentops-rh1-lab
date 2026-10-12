@@ -46,14 +46,29 @@ import httpx
 #: What the *browser* opens: the public route, which carries a `/mlflow` path
 #: prefix.
 MLFLOW_URL = os.environ.get("MLFLOW_URL", "").rstrip("/")
-#: What *this pod* calls, when that differs. The in-cluster service
-#: (`https://mlflow.redhat-ods-applications.svc.cluster.local:8443`) serves the
-#: REST API at its root with **no `/mlflow` prefix** — the prefix belongs to the
-#: route, not the API — so the two URLs are not interchangeable. Set this (with
-#: MLFLOW_CA_FILE) if the pod cannot reach its own cluster's public route.
+#: What *this pod* calls, when that differs from the browser-facing route.
+#:
+#: Both serve the REST API under a `/mlflow` prefix, and the two URLs carry it
+#: differently: MLFLOW_URL already ends in `/mlflow` because the route is
+#: mounted there, while the in-cluster Service
+#: (`https://mlflow.redhat-ods-applications.svc.cluster.local:8443`) does not.
+#: This file used to document the opposite — "the in-cluster service serves the
+#: REST API at its root with no /mlflow prefix" — and built paths to match, so
+#: against the Service every lookup 404'd. Verified on cluster-pz7xk:
+#: `/api/2.0/mlflow/experiments/get-by-name` answers 404 and
+#: `/mlflow/api/2.0/mlflow/experiments/get-by-name` answers 200.
+#:
+#: `_api` normalises it, so neither callers nor a future reader has to
+#: remember which form they were handed.
 API_URL = os.environ.get("MLFLOW_API_URL", "").rstrip("/") or os.environ.get(
     "MLFLOW_URL", ""
 ).rstrip("/")
+
+
+def _api(path: str) -> str:
+    """An absolute API URL, whichever base this deployment was given."""
+    base = API_URL if API_URL.endswith("/mlflow") else f"{API_URL}/mlflow"
+    return f"{base}{path}"
 #: The experiment Hermes writes to, named after the participant — the same
 #: value the bridge passes the plugin as `MLFLOW_EXPERIMENT`. The id can be set
 #: directly to skip the name lookup; otherwise it is resolved once and cached.
@@ -72,7 +87,17 @@ TOKEN_FILE = os.environ.get(
 )
 #: Set when MLFLOW_URL points at the in-cluster service, whose certificate is
 #: issued by openshift-service-serving-signer rather than a public root.
-CA_FILE = os.environ.get("MLFLOW_CA_FILE", "").strip()
+#: MLflow is served with an openshift-service-serving-signer certificate that
+#: no public trust store knows, so talking to the in-cluster Service without
+#: this fails verification — silently, because find_trace swallows transport
+#: errors and a console that cannot reach MLflow is still a working console.
+#: Defaulted to where tenant-platform mounts the mlflow-service-ca ConfigMap,
+#: so the common case needs no configuration.
+CA_FILE = os.environ.get("MLFLOW_CA_FILE", "").strip() or (
+    "/etc/mlflow-ca/service-ca.crt"
+    if os.path.isfile("/etc/mlflow-ca/service-ca.crt")
+    else ""
+)
 #: Spans are exported after the turn ends, so the trace does not exist the
 #: instant the answer does. Poll briefly rather than fetch once.
 LOOKUP_SECONDS = float(os.environ.get("MLFLOW_TRACE_LOOKUP_SECONDS", "8"))
@@ -95,10 +120,19 @@ def root_url() -> str:
 
 
 def trace_url(trace_id: str, experiment_id: str) -> str:
-    # MLflow's UI is a hash router; `experiments/:experimentId/traces/:traceId`
-    # is a real route, so this opens the trace itself rather than a filtered
-    # list the participant still has to read.
-    return f"{MLFLOW_URL}/#/experiments/{experiment_id}/traces/{trace_id}"
+    """A link that opens this exact trace.
+
+    `experiments/:id/traces/:traceId` looks like the obvious route and is not
+    one: MLflow's trace view is the experiment's traces tab with the trace
+    selected through a query parameter, so the path form lands on an empty
+    page. The workspace parameter is required too — without it the tab loads
+    against whatever workspace the session last used, which for a participant
+    is usually not theirs.
+    """
+    query = f"selectedEvaluationId={trace_id}"
+    if WORKSPACE:
+        query = f"workspace={WORKSPACE}&{query}"
+    return f"{MLFLOW_URL}/#/experiments/{experiment_id}/traces?{query}"
 
 
 def _client_for_mlflow() -> httpx.AsyncClient:
@@ -133,7 +167,7 @@ async def _resolve_experiment_id(token: str) -> str:
     if _experiment_id:
         return _experiment_id
     resp = await _client_for_mlflow().get(
-        f"{API_URL}/api/2.0/mlflow/experiments/get-by-name",
+        _api("/api/2.0/mlflow/experiments/get-by-name"),
         params={"experiment_name": EXPERIMENT_NAME},
         headers=_headers(token),
     )
@@ -176,7 +210,7 @@ async def _search(token: str, experiment_id: str, since_ms: int) -> list[dict]:
         "filter": f"attributes.timestamp > {since_ms}",
     }
     resp = await _client_for_mlflow().post(
-        f"{API_URL}/api/3.0/mlflow/traces/search", json=body, headers=_headers(token)
+        _api("/api/3.0/mlflow/traces/search"), json=body, headers=_headers(token)
     )
     if resp.status_code != 200:
         return []

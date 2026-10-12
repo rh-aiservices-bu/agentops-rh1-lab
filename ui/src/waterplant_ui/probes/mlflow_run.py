@@ -32,6 +32,7 @@ are already on screen, and this only adds a durable record and a link to it.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import ssl
@@ -63,6 +64,8 @@ EXPERIMENT = os.environ.get("MLFLOW_EXPERIMENT") or os.environ.get(
     "MLFLOW_CYCLE_EXPERIMENT", ""
 )
 NAMESPACE = os.environ.get("NAMESPACE", "")
+#: How long to let the span exporter flush before looking for the traces.
+TRACE_SETTLE_SECONDS = float(os.environ.get("PROBE_TRACE_SETTLE_S", "6"))
 
 _TOKEN_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 #: Mounted from the mlflow-service-ca ConfigMap. MLflow is served with an
@@ -92,6 +95,11 @@ def enabled() -> bool:
 
 def _api(path: str) -> str:
     return f"{MLFLOW_API_URL}/mlflow/api/2.0/mlflow{path}"
+
+
+def _api3(path: str) -> str:
+    """Traces are a 3.0-only API on this deployment; runs are still 2.0."""
+    return f"{MLFLOW_API_URL}/mlflow/api/3.0/mlflow{path}"
 
 
 def _headers() -> dict[str, str]:
@@ -126,6 +134,48 @@ async def _experiment_id(client: httpx.AsyncClient) -> str | None:
     except (httpx.HTTPError, KeyError, ValueError) as exc:
         log.warning("mlflow experiment lookup failed: %s", exc)
         return None
+
+
+async def find_traces_by_session(
+    client: httpx.AsyncClient, experiment_id: str, sessions: set[str]
+) -> dict[str, str]:
+    """session id -> trace id, for the sessions we are given.
+
+    Matched on `mlflow.trace.session`, which hermes_otel writes from the
+    X-Hermes-Session-Id the probe sent. That is an exact match to the probe
+    that produced it — "the most recent trace" would be wrong precisely when
+    it matters, with several turns in flight.
+
+    Returns what it finds. A missing trace is normal: export is asynchronous,
+    and a sweep can finish before the last batch lands.
+    """
+    if not sessions:
+        return {}
+    body = {
+        "locations": [{
+            "type": "MLFLOW_EXPERIMENT",
+            "mlflow_experiment": {"experiment_id": experiment_id},
+        }],
+        # Enough to cover one sweep several times over without paging.
+        "max_results": 200,
+    }
+    try:
+        response = await client.post(
+            _api3("/traces/search"), json=body, headers=_headers(), timeout=25.0
+        )
+        response.raise_for_status()
+        traces = response.json().get("traces", [])
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("mlflow trace lookup failed: %s", exc)
+        return {}
+
+    found = {}
+    for trace in traces:
+        meta = trace.get("trace_metadata") or {}
+        session = meta.get("mlflow.trace.session")
+        if session in sessions:
+            found[session] = trace.get("trace_id", "")
+    return found
 
 
 async def log_eval_sweep(
@@ -192,6 +242,25 @@ async def _write(client: httpx.AsyncClient, summary: dict[str, Any]) -> str | No
             {"key": f"inconclusive.{r['id']}", "value": r["detail"][:400]}
             for r in summary["results"]
             if r["outcome"] == "inconclusive"
+        ]
+        # Each eval's trace, recorded on the run as a tag.
+        #
+        # Not the same thing as MLflow's own run-to-trace association, which
+        # is what fills a run's Evaluations tab. That needs `mlflow.sourceRun`
+        # set in the trace's metadata, and metadata is fixed when the trace is
+        # written: hermes_otel sends it from a config rendered at pod start,
+        # long before this run exists. Setting it afterwards needs
+        # UpdateTraceInfo, which this MLflow answers with a 500 —
+        # `TraceStatus.UNSPECIFIED is not a valid TraceStatus` — for every
+        # body shape, a v2/v3 mismatch in the server rather than the request.
+        #
+        # So the link runs the other way: the run names its traces, and the
+        # console links straight to them. The Evaluations tab stays empty
+        # until the server can take the association.
+        tags += [
+            {"key": f"trace.{r['id']}", "value": r["trace_id"]}
+            for r in summary["results"]
+            if r.get("trace_id")
         ]
 
         await client.post(

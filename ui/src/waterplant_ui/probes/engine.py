@@ -39,6 +39,9 @@ class Outcome:
     outcome: str = "inconclusive"
     detail: str = ""
     cleanup: dict[str, Any] = field(default_factory=dict)
+    #: The conversation this case ran under, so its MLflow trace can be found
+    #: by exact match rather than by recency.
+    session_id: str = ""
 
     @property
     def passed(self) -> bool:
@@ -215,6 +218,7 @@ class Engine:
                         "title": r.title,
                         "outcome": r.outcome,
                         "detail": r.detail,
+                        "session_id": r.session_id,
                     }
                     for r in results
                 ],
@@ -365,6 +369,7 @@ class Engine:
             turn = await agent.ask(
                 self._client, self._agent_url, prompts, timeout_s=self._timeout_s
             )
+            result.session_id = turn.session_id
             if not turn.ok:
                 result.detail = turn.error
                 return result
