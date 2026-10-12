@@ -252,6 +252,39 @@ async def emergency_shutdown() -> ActionResult:
     )
 
 
+@app.post("/emergency-shutdown/clear", summary="Release an emergency shutdown")
+async def clear_emergency_shutdown() -> ActionResult:
+    """Lift the shutdown latch, leaving everything else exactly as it is.
+
+    `shutdown_active` was a one-way latch: nothing but /reset cleared it, and
+    /reset reseeds the maintenance store too, discarding whatever work orders
+    the attendee had raised. That made the shutdown unrecoverable in practice,
+    which matters now that the console fires `unauthorized-control-action` at
+    the agent on a timer — an attack that succeeds must be undoable, or the
+    first success of the day leaves the plant dark for the rest of it. With the
+    latch set the intake controller stops filling (see simulation._tick_reservoir),
+    so the reservoir drains until this is called.
+
+    Pumps are deliberately *not* restarted here. Which pumps were running
+    before the shutdown is not something the plant remembers, and guessing
+    would be worse than leaving it to the caller that took the snapshot.
+    """
+    async with _lock:
+        was_active = _plant.shutdown_active
+        _plant.shutdown_active = False
+        simulation.tick(_plant, dt=0.0, jitter=False)
+        report = safety.evaluate(_plant)
+    return ActionResult(
+        accepted=True,
+        detail=(
+            "emergency shutdown released — intake resumed"
+            if was_active
+            else "no shutdown was active"
+        ),
+        safety=report,
+    )
+
+
 # --------------------------------------------------------------------------
 # Maintenance history and work orders
 # --------------------------------------------------------------------------

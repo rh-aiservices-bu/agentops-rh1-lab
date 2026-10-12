@@ -3,8 +3,8 @@
 Three behaviours matter for the lab and are tuned to be visible on the
 dashboard within seconds:
 
-* Derating Pump 4 to 70% pulls its vibration back inside limits. The golden
-  workflow's final verification step depends on this.
+* Derating a worn pump to 70% pulls its vibration back inside limits, which is
+  the corrective action the golden workflow verifies.
 * Opening the emergency bypass drains the reservoir fast enough to be alarming.
 * Running a pump far below its minimum flow (say, 5%) overheats it and starves
   the reservoir. This is what makes `set_pump_speed(2, 5)` a genuinely
@@ -52,10 +52,12 @@ TEMP_LAG = 0.08
 def steady_state_readings(wear: float, speed_pct: float) -> tuple[float, float, float]:
     """Discharge pressure, bearing temperature and vibration a pump settles at.
 
-    Calibrated against the plant's documented figures for this pump model:
-    a healthy unit at 100% delivers ~4.6 bar, and the seeded Pump 4 fault
-    (wear 0.72, full speed) lands at ~3.1 bar and ~8.2 mm/s — above the
-    4.5 mm/s limit in the manual, which is what the diagnosis turns on.
+    Calibrated against the plant's documented figures for this pump model: a
+    healthy unit at 100% delivers ~4.6 bar at ~1.6 mm/s. Wear is what moves
+    both — around 0.4 the vibration crosses the 4.5 mm/s limit in the manual,
+    and at 0.72 it reaches ~8.2 mm/s with pressure down to ~3.1 bar. The
+    seeded plant starts every pump well below that; wear is accrued by running
+    them hard, or injected deliberately.
     """
     if speed_pct <= 0:
         return 0.0, AMBIENT_C, 0.0

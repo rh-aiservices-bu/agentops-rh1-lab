@@ -183,33 +183,47 @@ function renderStatus(safety) {
       : "lamp";
 }
 
-function renderReservoir(r) {
+/* Reservoir level, and turbidity beside it.
+ *
+ * The inflow/outflow/capacity readouts that used to sit here are gone. Two of
+ * them were percent-of-reservoir-per-second, a unit nothing in the lab refers
+ * to, and capacity was the constant 5,000 m3 — a third of a panel spent
+ * restating a number that cannot change. The "% of capacity" caption under
+ * the needle already says the useful thing.
+ *
+ * Turbidity survived the same cull that removed the pH and chlorine gauges,
+ * and is the only water-quality reading left, because it is the only one that
+ * is actually checked: it climbs when the reservoir is drawn down or the
+ * emergency bypass dumps unfiltered water through, which makes it the visible
+ * consequence of the destructive attacks. pH never moved off 7.2 and both it
+ * and chlorine rendered a hardcoded "ok" no matter what the plant was doing. */
+function renderReservoir(r, q, checks) {
   $("g-reservoir").innerHTML =
     gauge({ value: r.level_pct, min: 0, max: 100, label: "Reservoir", unit: "%", ticks: 4 }) +
     `<span class="gauge-cap">${num(r.level_pct, 1)} % of capacity</span>`;
-  $("inflow").innerHTML = num(r.inflow_pct_s, 3);
-  $("outflow").innerHTML = num(r.outflow_pct_s, 3);
-  $("capacity").innerHTML = r.capacity_m3.toLocaleString();
-}
 
-function renderQuality(q, checks) {
   const turb = statusOf(checks, "water_quality", "turbidity");
-  const cells = [
-    { label: "pH", value: q.ph, min: 0, max: 14, unit: "", digits: 2, status: "ok", ticks: 7 },
-    { label: "Chlorine", value: q.chlorine_mg_l, min: 0, max: 3, unit: "mg/L", digits: 2, status: "ok", ticks: 3 },
-    { label: "Turbidity", value: q.turbidity_ntu, min: 0, max: 5, unit: "NTU", digits: 3, status: turb, ticks: 5, dangerFrom: 1 },
-  ];
-  $("quality").innerHTML = cells
-    .map(
-      (c) => `
-      <div class="cell">
-        <div class="gauge-wrap">${gauge(c)}</div>
-        ${lcd(num(c.value, c.digits), c.unit, c.status)}
-      </div>`
-    )
-    .join("");
+  $("turbidity-aside").innerHTML =
+    `<span class="k engraved">Turbidity</span>${lcd(num(q.turbidity_ntu, 3), "NTU", turb)}`;
 }
 
+/* One compact row per pump, not a card with two big dials.
+ *
+ * Four 258px cards needed a full-width row of their own, which is a large
+ * part of why the console used to be two viewports tall. Side by side in the
+ * narrower left column they got ~160px each, too little for two dials, and
+ * the fourth wrapped out of its panel.
+ *
+ * Both dials are gone rather than shrunk. Four rows in the space available
+ * are ~47px tall and the smallest legible dial is ~54px, so a dial here is a
+ * clipped dial — worse than none. Speed becomes a bar, which says "derated to
+ * 70%" at a glance without being read at all; vibration joins discharge and
+ * bearing as an LCD, taking its colour from the same safety check that used
+ * to drive the dial's red arc. The reservoir keeps its needle, so the console
+ * does not lose the instrument it is built around.
+ *
+ * Vibration is listed first of the three: it is the reading the golden
+ * workflow turns on and the figure module 1 quotes. */
 function renderPumps(pumps, checks) {
   $("pumps").innerHTML = Object.keys(pumps)
     .sort((a, b) => a - b)
@@ -220,38 +234,29 @@ function renderPumps(pumps, checks) {
       const lampCls =
         !p.running ? "lamp" : worst === "critical" ? "lamp on red" : worst === "warn" ? "lamp on amber" : "lamp on green";
 
-      const vibStatus = statusOf(checks, subject, "vibration");
       const headStatus = statusOf(checks, subject, "head_deficit");
       const tempStatus = statusOf(checks, subject, "bearing_temp");
+      const speedStatus = statusOf(checks, subject, "vibration");
+
+      // A stopped pump turns at zero, but the drive keeps its speed reference
+      // and resumes from it. Showing that is the difference between "this pump
+      // is off" and "this pump is off and will come back at 60%".
+      const speedShown = p.running ? p.speed_pct : p.speed_setpoint_pct;
 
       return `
-      <div class="pump plate">
-        <div class="pump-hd">
-          <div>
-            <span class="nm engraved">Pump ${p.id}</span>
-            <span class="model">${p.model}</span>
-          </div>
-          <div class="right">
-            <span class="${lampCls}"></span>
-            <span class="chip ${worst}">${worst}</span>
-          </div>
+      <div class="pump plate ${p.running ? "" : "idle"}">
+        <div class="pump-id">
+          <span class="${lampCls}"></span>
+          <span class="nm engraved">Pump ${p.id}</span>
+          <span class="chip ${worst}">${worst}</span>
         </div>
-        <div class="pump-gauges">
-          <div class="gauge-wrap">
-            ${gauge({ value: p.speed_pct, min: 0, max: 100, label: "Speed", unit: "%", ticks: 4 })}
-            ${
-              // A stopped pump turns at zero, but the drive keeps its speed
-              // reference and resumes from it. Showing that is the difference
-              // between "this pump is off" and "this pump is off and will come
-              // back at 60%".
-              p.running
-                ? ""
-                : `<span class="gauge-cap">setpoint ${num(p.speed_setpoint_pct, 0)}%</span>`
-            }
-          </div>
-          <div class="gauge-wrap">${gauge({ value: p.vibration_mm_s, min: 0, max: 12, label: "Vibration", unit: "mm/s", ticks: 4, dangerFrom: 4.5 })}</div>
+        <div class="pump-speed">
+          <span class="k engraved">${p.running ? "Speed" : "Setpoint"}</span>
+          <span class="bar ${speedStatus}"><span style="width:${Math.max(0, Math.min(100, speedShown))}%"></span></span>
+          <span class="pc">${num(speedShown, 0)}%</span>
         </div>
         <div class="pump-lcds">
+          <div class="cell"><span class="k engraved">Vibration</span>${lcd(num(p.vibration_mm_s, 2), "mm/s", speedStatus)}</div>
           <div class="cell"><span class="k engraved">Discharge</span>${lcd(num(p.discharge_bar, 2), "bar", headStatus)}</div>
           <div class="cell"><span class="k engraved">Bearing</span>${lcd(num(p.bearing_temp_c, 1), "°C", tempStatus)}</div>
         </div>
@@ -307,18 +312,31 @@ function renderChecks(safety) {
 }
 
 /* ── polling ─────────────────────────────────────────────── */
+/* The attack/eval event cursor.
+ *
+ * -1 means "I have just loaded": the server answers with the current sequence
+ * number and no backlog, so a reload does not replay an hour of old attacks as
+ * live toasts. From then on we send the highest sequence we have seen and get
+ * everything after it — which is the entire notification mechanism. No
+ * websocket, no SSE, no push channel: a dropped poll costs nothing because the
+ * next one asks from the same cursor again. */
+let eventCursor = -1;
+
 async function poll() {
   try {
-    const res = await fetch("/api/state");
+    const res = await fetch(`/api/state?eventsSince=${eventCursor}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const { plant, safety } = await res.json();
+    const { plant, safety, events, eventCursor: cursor, probesBusy } = await res.json();
 
     renderStatus(safety);
-    renderReservoir(plant.reservoir);
-    renderQuality(plant.quality, safety.checks);
+    renderReservoir(plant.reservoir, plant.quality, safety.checks);
     renderPumps(plant.pumps, safety.checks);
     renderValves(plant.valves);
     renderChecks(safety);
+
+    if (typeof cursor === "number") eventCursor = cursor;
+    (events || []).forEach(handleProbeEvent);
+    setProbeButtons(!probesBusy);
 
     $("conn").textContent = `live · tick ${plant.tick}`;
     $("conn").className = "tick";
@@ -329,6 +347,289 @@ async function poll() {
     $("lamp-alarm").className = "lamp on red";
     $("status-box").className = "status-box unknown";
     $("status-v").textContent = "—";
+  }
+}
+
+/* ── attack and evaluation notifications ──────────────────
+ *
+ * Three states, and they must stay visually distinct or the console lies
+ * about the one thing it exists to tell the participant:
+ *
+ *   blocked      the attack was stopped. You are defended against this.
+ *   got_through  it worked. You are not.
+ *   inconclusive the engine could not judge it — agent unreachable, a probe
+ *                error, or a case whose observer does not exist yet. NOT a
+ *                pass, and rendering it as one would be the single most
+ *                dangerous thing this panel could do.
+ */
+
+const TOAST_DISMISS_MS = 14000;
+
+/* Live toasts by case id, so a `resolved` event updates the toast its
+ * `started` event raised rather than stacking a second one beside it. */
+const liveToasts = new Map();
+
+const esc = (s) =>
+  String(s ?? "").replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+  );
+
+const OUTCOME = {
+  blocked: { cls: "ok", mark: "✓", word: "Blocked" },
+  /* Its own colour, between blocked and got-through. The attack did not land,
+   * but nothing stopped it — the agent simply chose not to comply, and a
+   * model's judgement is not a control. Showing this as green "Blocked" would
+   * tell a participant who has hardened nothing that they are defended. */
+  declined: { cls: "weak", mark: "~", word: "Declined, not blocked" },
+  got_through: { cls: "bad", mark: "✗", word: "Got through" },
+  inconclusive: { cls: "unknown", mark: "?", word: "Inconclusive" },
+  passed: { cls: "ok", mark: "✓", word: "Passed" },
+  failed: { cls: "bad", mark: "✗", word: "Failed" },
+};
+
+/* A toast is a shell — a dismiss button and a body — built once. The render
+ * functions rewrite only the body, so the close button keeps its listener
+ * across the started -> resolved transition instead of being re-bound on
+ * every repaint. */
+function toastEl(key) {
+  let el = liveToasts.get(key);
+  if (el && el.isConnected) return el;
+  el = document.createElement("div");
+  el.className = "toast";
+  el.innerHTML =
+    '<button type="button" class="t-close" aria-label="Dismiss notification" ' +
+    'title="Dismiss">&times;</button><div class="t-body"></div>';
+
+  el.querySelector(".t-close").addEventListener("click", (e) => {
+    // Without this the click bubbles to the pin handler below and the toast
+    // pins itself on its way out.
+    e.stopPropagation();
+    dismissToast(el);
+  });
+
+  /* Clicking the body pins. An attack that got through is exactly the one
+   * someone wants to read twice, and it is also the one most likely to arrive
+   * while they are looking somewhere else. Dismissal is the × rather than the
+   * body, so that reading a result can never destroy it by accident. */
+  el.addEventListener("click", () => {
+    el.classList.toggle("pinned");
+    if (el.classList.contains("pinned")) clearTimeout(el._timer);
+    else scheduleDismiss(el);
+  });
+
+  $("toasts").prepend(el);
+  liveToasts.set(key, el);
+  return el;
+}
+
+/* Where the render functions write. */
+const toastBody = (el) => el.querySelector(".t-body");
+
+/* Dismiss now, pinned or not. The × means "go away", so it has to beat the
+ * pin — a pinned eval scorecard is otherwise unclosable, since pinning also
+ * cancels the timer that would have removed it. */
+function dismissToast(el) {
+  clearTimeout(el._timer);
+  el.classList.add("leaving");
+  setTimeout(() => {
+    el.remove();
+    for (const [k, v] of liveToasts) if (v === el) liveToasts.delete(k);
+  }, 300);
+}
+
+function scheduleDismiss(el, ms = TOAST_DISMISS_MS) {
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => {
+    if (el.classList.contains("pinned")) return;
+    dismissToast(el);
+  }, ms);
+}
+
+function handleProbeEvent(ev) {
+  if (ev.kind === "plant") {
+    return toastNotice(
+      "plant-reset", "ok", ev.title || "Plant reset", ev.detail || ""
+    );
+  }
+  if (ev.kind === "evals") return handleEvalEvent(ev);
+  if (ev.kind === "eval") return; // per-eval detail lands in the sweep card
+  if (ev.kind !== "attack") return;
+
+  const el = toastEl(`attack:${ev.id}`);
+  const body = toastBody(el);
+
+  if (ev.phase === "started") {
+    el.className = "toast running";
+    body.innerHTML = `
+      <div class="t-hd"><span class="t-mark spin">◴</span>
+        <span class="t-kind">Attack in progress</span>
+        <span class="t-sev ${esc(ev.severity)}">${esc(ev.severity)}</span></div>
+      <div class="t-title">${esc(ev.title)}</div>
+      <div class="t-blurb">${esc(ev.blurb)}</div>`;
+    clearTimeout(el._timer);
+    return;
+  }
+
+  const o = OUTCOME[ev.outcome] || OUTCOME.inconclusive;
+  const cleanup = ev.cleanup || {};
+  /* Cleanup is shown whenever it was attempted, and loudly when it failed:
+   * an attack that got through and could not be undone has left the plant in
+   * a state the participant needs to know about. */
+  /* "the agent put it back when asked" and "the lab reached past the agent"
+   * are different events, and only the first says anything about the agent —
+   * so the path is named rather than folded into the detail text. */
+  const via =
+    cleanup.via === "agent" ? "Cleaned up by the agent"
+    : cleanup.via === "direct" ? "Cleaned up directly"
+    : "Cleaned up";
+  const cleanupLine = cleanup.attempted
+    ? `<div class="t-cleanup ${cleanup.succeeded ? "ok" : "bad"}">
+         ${cleanup.succeeded ? via : "Cleanup failed"} — ${esc(cleanup.detail)}
+       </div>`
+    : "";
+
+  el.className = `toast ${o.cls}`;
+  body.innerHTML = `
+    <div class="t-hd"><span class="t-mark">${o.mark}</span>
+      <span class="t-kind">${o.word}</span>
+      <span class="t-sev ${esc(ev.severity)}">${esc(ev.severity)}</span></div>
+    <div class="t-title">${esc(ev.title)}</div>
+    <div class="t-blurb">${esc(ev.blurb)}</div>
+    ${ev.detail ? `<div class="t-detail">${esc(ev.detail)}</div>` : ""}
+    ${cleanupLine}`;
+  /* A successful attack stays up longer than a blocked one. It is the result
+   * that calls for action. */
+  scheduleDismiss(el, ev.outcome === "got_through" ? TOAST_DISMISS_MS * 2 : TOAST_DISMISS_MS);
+}
+
+function handleEvalEvent(ev) {
+  const el = toastEl("evals");
+  const body = toastBody(el);
+
+  if (ev.phase === "started") {
+    el.className = "toast running wide";
+    body.innerHTML = `
+      <div class="t-hd"><span class="t-mark spin">◴</span>
+        <span class="t-kind">Running evaluations</span></div>
+      <div class="t-blurb">${esc(ev.total)} evals against the agent — this takes a minute.</div>`;
+    clearTimeout(el._timer);
+    return;
+  }
+
+  const all = ev.passed === ev.total && ev.total > 0;
+  const rows = (ev.results || [])
+    .map((r) => {
+      const o = OUTCOME[r.outcome] || OUTCOME.inconclusive;
+      return `<li class="${o.cls}"><span class="m">${o.mark}</span>
+        <span class="n">${esc(r.title)}</span>
+        <span class="d">${esc(r.detail)}</span></li>`;
+    })
+    .join("");
+
+  el.className = `toast wide ${all ? "ok" : "bad"}`;
+  body.innerHTML = `
+    <div class="t-hd"><span class="t-mark">${all ? "✓" : "✗"}</span>
+      <span class="t-kind">Evaluation suite</span></div>
+    <div class="t-score">${ev.passed} <span class="of">/ ${ev.total}</span>
+      <span class="w">evals passed</span></div>
+    ${ev.inconclusive ? `<div class="t-detail">${ev.inconclusive} could not be judged — not counted as failures.</div>` : ""}
+    <ul class="t-list">${rows}</ul>
+    ${
+      ev.mlflowRunUrl
+        ? `<a class="t-link" href="${esc(ev.mlflowRunUrl)}" target="_blank" rel="noopener">Open the MLflow run →</a>`
+        : `<div class="t-detail">No MLflow run recorded — tracking is not configured here.</div>`
+    }`;
+  /* Pinned from the start: a scorecard someone asked for should not evaporate
+   * while they are still reading which eval failed. */
+  el.classList.add("pinned");
+  clearTimeout(el._timer);
+}
+
+function setProbeButtons(enabled) {
+  for (const id of ["run-attack", "run-evals", "reset-plant"]) {
+    const b = $(id);
+    if (b) b.disabled = !enabled;
+  }
+}
+
+function toastNotice(key, cls, title, detail) {
+  const el = toastEl(key);
+  const body = toastBody(el);
+  el.className = `toast ${cls}`;
+  body.innerHTML = `<div class="t-hd"><span class="t-mark">!</span>
+      <span class="t-kind">${esc(title)}</span></div>
+    <div class="t-blurb">${esc(detail)}</div>`;
+  scheduleDismiss(el);
+}
+
+async function resetPlant() {
+  /* Confirmed, because it is not only the plant that goes back: /reset
+   * reseeds the maintenance store too, so any work order raised since the
+   * last reset is gone. Destroying someone's work on a single stray click
+   * is not a thing a control panel should do. */
+  const ok = window.confirm(
+    "Reset the plant to its seeded starting state?\n\n" +
+      "This also discards every work order and maintenance record raised " +
+      "since the last reset."
+  );
+  if (!ok) return;
+
+  setProbeButtons(false);
+  try {
+    const res = await fetch("/api/plant/reset", { method: "POST" });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toastNotice("plant-reset", "unknown", "Reset failed", body.detail || `HTTP ${res.status}`);
+    }
+    /* On success the server emits the event and the 1 Hz poll renders it,
+     * the same path a scheduled attack takes. */
+  } catch (err) {
+    toastNotice("plant-reset", "unknown", "Reset failed", err.message);
+  } finally {
+    setProbeButtons(true);
+  }
+}
+
+async function runRandomAttack() {
+  setProbeButtons(false);
+  try {
+    const res = await fetch("/api/attacks/run", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: null }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toastNotice("probe-error", "unknown", "Attack not started", body.detail || `HTTP ${res.status}`);
+      setProbeButtons(true);
+    }
+    /* On success we say nothing here. The `started` event is already on its
+     * way through the 1 Hz poll and will raise the real toast — announcing it
+     * twice, once locally and once from the server, is how the button and the
+     * scheduler drift apart. */
+  } catch (err) {
+    toastNotice("probe-error", "unknown", "Attack not started", err.message);
+    setProbeButtons(true);
+  }
+}
+
+async function runEvals() {
+  setProbeButtons(false);
+  try {
+    const res = await fetch("/api/evals/run", { method: "POST" });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toastNotice("probe-error", "unknown", "Evals not started", body.detail || `HTTP ${res.status}`);
+      return;
+    }
+    /* The sweep is synchronous, so the scorecard is in this response. It also
+     * arrives as an event; handleEvalEvent is keyed on "evals" so whichever
+     * lands first renders and the other updates the same card in place. */
+    handleEvalEvent({ ...body, phase: "resolved" });
+  } catch (err) {
+    toastNotice("probe-error", "unknown", "Evals failed", err.message);
+  } finally {
+    setProbeButtons(true);
   }
 }
 
@@ -623,6 +924,65 @@ async function ask(event) {
         "and the MCP servers are running, so this panel reflects real simulator " +
         "state — including any control action taken against it."
     );
+  }
+
+  $("run-attack").addEventListener("click", runRandomAttack);
+  $("run-evals").addEventListener("click", runEvals);
+  $("reset-plant").addEventListener("click", resetPlant);
+
+  /* Escape clears the lot. With several results stacked up, dismissing them
+   * one × at a time is busywork, and the composer is the only other thing on
+   * the page that wants the key — so leave it alone while someone is typing. */
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    if (document.activeElement === $("prompt")) return;
+    document.querySelectorAll(".toast").forEach(dismissToast);
+  });
+
+  /* The probe catalogue decides whether the buttons do anything at all. A
+   * console with no agent, or with the engine switched off, says so on the
+   * button rather than letting someone press it and get a 503. */
+  try {
+    const probes = await (await fetch("/api/probes")).json();
+    if (probes.problem) {
+      /* No definitions reached the container. That is a deployment fault, not
+       * a lab state, and it must not be left looking like "everything is
+       * switched off". */
+      setProbeButtons(false);
+      toastNotice(
+        "probe-defs",
+        "unknown",
+        "No attack definitions loaded",
+        probes.problem
+      );
+    }
+    if (!probes.available) {
+      setProbeButtons(false);
+      // Resetting the plant needs plant-api, not the agent, so it stays live
+      // even when there is nothing to probe.
+      $("reset-plant").disabled = false;
+      const why = agentAvailable
+        ? "The attack and evaluation engine is disabled here."
+        : "Attacks and evals need a deployed agent to run against.";
+      for (const id of ["run-attack", "run-evals"]) $(id).title = why;
+    } else {
+      const armed = probes.attacks.filter((a) => a.enabled).length;
+      const held = probes.attacks.length - armed;
+      /* Say how many are not armed. A participant who cannot see that three of
+       * the seven attacks never fire would reasonably conclude they are
+       * defended against them. */
+      $("run-attack").title =
+        `${armed} of ${probes.attacks.length} attacks are armed` +
+        (held ? ` — ${held} need infrastructure that does not exist yet` : "") +
+        ". Fires one at random now." +
+        (probes.scheduled
+          ? ""
+          : " Automatic attacks are switched off, so this button is the only way one runs.");
+      const live = probes.evals.filter((e) => e.enabled).length;
+      $("run-evals").title = `Runs all ${live} armed evals and scores them.`;
+    }
+  } catch {
+    /* the catalogue is a nicety; the buttons still work without it */
   }
 
   poll();
