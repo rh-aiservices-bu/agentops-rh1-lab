@@ -310,6 +310,49 @@ async def reset_plant() -> JSONResponse:
     return JSONResponse({"reset": True})
 
 
+@app.post("/api/plant/release-shutdown")
+async def release_shutdown() -> JSONResponse:
+    """Lift an emergency shutdown, leaving everything else as it is.
+
+    Restarting the pumps does not do this, and that surprises people: the
+    latch is independent of pump state, and while it is set the intake
+    controller stops, so the reservoir drains *faster* with the pumps running.
+    Nothing the agent can call releases it either — control-mcp has seven
+    tools and none of them clears a shutdown.
+
+    A full reset would clear it, but it also reseeds the maintenance store and
+    takes the participant's work orders with it. This is the surgical option,
+    and it is why plant-api 0.2.0 added the endpoint.
+    """
+    try:
+        response = await client().post(
+            f"{PLANT_API_URL}/emergency-shutdown/clear", timeout=20.0
+        )
+        if response.status_code == 404:
+            return JSONResponse(
+                {
+                    "error": "unsupported",
+                    "detail": (
+                        "This plant-api predates POST /emergency-shutdown/clear. "
+                        "Only a full plant reset can release the shutdown."
+                    ),
+                },
+                status_code=501,
+            )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        return JSONResponse(
+            {"error": "release_failed", "detail": f"plant-api: {exc}"}, status_code=502
+        )
+
+    probe_events.emit(
+        kind="plant", phase="resolved", id="shutdown-released",
+        title="Shutdown released", outcome="ok",
+        detail="the intake is filling again; nothing else was changed",
+    )
+    return JSONResponse({"released": True})
+
+
 @app.post("/api/evals/run")
 async def run_evals() -> JSONResponse:
     """Run the whole eval suite and return the scorecard.

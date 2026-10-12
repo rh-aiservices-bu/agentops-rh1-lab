@@ -328,6 +328,13 @@ async function poll() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const { plant, safety, events, eventCursor: cursor, probesBusy } = await res.json();
 
+    /* An emergency shutdown stops the intake controller, so the reservoir
+     * drains from here on. It is the one plant state that gets worse the
+     * longer it goes unnoticed, and a red row in the safety list is easy to
+     * miss on a panel that is already amber. The whole console goes red. */
+    document.body.classList.toggle("plant-shutdown", !!plant.shutdown_active);
+    $("mast-alarm").hidden = !plant.shutdown_active;
+
     renderStatus(safety);
     renderReservoir(plant.reservoir, plant.quality, safety.checks);
     renderPumps(plant.pumps, safety.checks);
@@ -435,6 +442,13 @@ function dismissToast(el) {
 
 function handleProbeEvent(ev) {
   if (ev.kind === "plant") {
+    /* Clear the transcript with the plant. After a reset the conversation
+     * above refers to pumps, work orders and readings that no longer exist,
+     * and the agent's own session is gone with it — so leaving it on screen
+     * invites reading a stale answer as a current one. Covers all three
+     * paths, because they all emit this event: the button, before an attack,
+     * and before an eval sweep. */
+    if (ev.id === "plant-reset") clearTranscript(ev.detail || "");
     return toastNotice(
       "plant-reset", "ok", ev.title || "Plant reset", ev.detail || ""
     );
@@ -531,7 +545,7 @@ function handleEvalEvent(ev) {
 }
 
 function setProbeButtons(enabled) {
-  for (const id of ["run-attack", "run-evals", "reset-plant"]) {
+  for (const id of ["run-attack", "run-evals", "reset-plant", "attack-choice"]) {
     const b = $(id);
     if (b) b.disabled = !enabled;
   }
@@ -574,13 +588,37 @@ async function resetPlant() {
   }
 }
 
-async function runRandomAttack() {
+async function releaseShutdown() {
+  /* Not confirmed, unlike Reset: this changes one latch and nothing else —
+   * no work orders, no pump state — and the plant is actively draining while
+   * the dialog would be open. */
+  const btn = $("release-shutdown");
+  btn.disabled = true;
+  try {
+    const res = await fetch("/api/plant/release-shutdown", { method: "POST" });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toastNotice(
+        "shutdown-release", "unknown", "Could not release the shutdown",
+        body.detail || `HTTP ${res.status}`
+      );
+    }
+    /* On success the server emits the event and the poll renders it, the
+     * same path every other plant change takes. */
+  } catch (err) {
+    toastNotice("shutdown-release", "unknown", "Could not release the shutdown", err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function runAttack() {
   setProbeButtons(false);
   try {
     const res = await fetch("/api/attacks/run", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: null }),
+      body: JSON.stringify({ id: $("attack-choice").value || null }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) {
@@ -623,8 +661,12 @@ function personaSlug() {
 }
 
 /* Terminal lines rather than chat bubbles: on a phosphor screen, a bubble
-   would look like a web page pretending to be a terminal. The block cursor is
-   re-parked at the foot of the buffer after every write. */
+   would look like a web page pretending to be a terminal.
+
+   Nothing is parked at the foot of the buffer after a write. A block cursor
+   used to be, and a blinking block under a finished answer reads as "still
+   thinking" — the one thing a transcript should never be ambiguous about.
+   The composer below already shows where input goes. */
 function addMessage(role, text) {
   const chat = $("chat");
   const pinned = isPinned(chat);
@@ -652,13 +694,6 @@ function addMessage(role, text) {
   line.appendChild(document.createTextNode(text));
   chat.appendChild(line);
 
-  const cur = document.createElement("p");
-  cur.className = "line cursor-line";
-  const blk = document.createElement("span");
-  blk.className = "cursor";
-  cur.appendChild(blk);
-  chat.appendChild(cur);
-
   stick(chat, pinned);
 }
 
@@ -685,7 +720,24 @@ function addMessage(role, text) {
  */
 const MAX_HISTORY_TURNS = 20;
 const history = [];
-const conversationId = crypto.randomUUID();
+/* Not const: a plant reset starts a new conversation. Keeping the old id
+   would have Hermes reload a session whose transcript describes a plant that
+   no longer exists, and answer follow-ups from it. */
+let conversationId = crypto.randomUUID();
+
+/* Wipe the console back to a clean start, in step with the plant. */
+function clearTranscript(reason) {
+  const chat = $("chat");
+  if (chat) chat.innerHTML = "";
+  history.length = 0;
+  conversationId = crypto.randomUUID();
+  addMessage(
+    "system",
+    reason
+      ? `Plant reset — ${reason} This conversation has been cleared and the agent starts fresh.`
+      : "Plant reset. This conversation has been cleared and the agent starts fresh."
+  );
+}
 
 function remember(role, content) {
   const text = (content || "").trim();
@@ -805,7 +857,9 @@ async function ask(event) {
         if (ev.type === "token") {
           write(ev.text);
         } else if (ev.type === "status") {
-          trace("dim", `· ${ev.message}`, ev.link);
+          // An empty message means the link is the whole line.
+          const body = ev.message ? `· ${ev.message}` : "·";
+          trace(ev.level === "bad" ? "err" : "dim", body, ev.link);
         } else if (ev.type === "tool_call") {
           const args = Object.entries(ev.arguments || {})
             .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
@@ -835,14 +889,7 @@ async function ask(event) {
     // the transcript from what the operator can see on screen.
     remember("assistant", replyText);
 
-    // Re-park the cursor at the foot of the buffer.
     chat.querySelector(".cursor-line")?.remove();
-    const cur = document.createElement("p");
-    cur.className = "line cursor-line";
-    const blk = document.createElement("span");
-    blk.className = "cursor";
-    cur.appendChild(blk);
-    chat.appendChild(cur);
     // Always return to the foot when a turn completes: the answer is finished
     // and the prompt is waiting.
     chat.scrollTop = chat.scrollHeight;
@@ -922,9 +969,10 @@ async function ask(event) {
   trackMastHeight();
   addEventListener("resize", trackMastHeight);
 
-  $("run-attack").addEventListener("click", runRandomAttack);
+  $("run-attack").addEventListener("click", runAttack);
   $("run-evals").addEventListener("click", runEvals);
   $("reset-plant").addEventListener("click", resetPlant);
+  $("release-shutdown").addEventListener("click", releaseShutdown);
 
   /* Escape clears the lot. With several results stacked up, dismissing them
    * one × at a time is busywork, and the composer is the only other thing on
@@ -964,6 +1012,19 @@ async function ask(event) {
     } else {
       const armed = probes.attacks.filter((a) => a.enabled).length;
       const held = probes.attacks.length - armed;
+
+      /* Fill the picker. Held cases are listed but disabled, with the reason
+       * on the option — a participant who cannot see that a case never runs
+       * would reasonably assume they are defended against it. */
+      const sel = $("attack-choice");
+      for (const a of probes.attacks) {
+        const opt = document.createElement("option");
+        opt.value = a.id;
+        opt.textContent = a.enabled ? a.title : `${a.title} — not armed`;
+        opt.disabled = !a.enabled;
+        if (a.disabledReason) opt.title = a.disabledReason;
+        sel.appendChild(opt);
+      }
       /* Say how many are not armed. A participant who cannot see that three of
        * the seven attacks never fire would reasonably conclude they are
        * defended against them. */

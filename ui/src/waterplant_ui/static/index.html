@@ -15,6 +15,13 @@
     <span class="site engraved">Northgate Water Treatment Works</span>
     <h1>Operator Console</h1>
   </div>
+  <div class="mast-alarm" id="mast-alarm" hidden>
+    <span>Emergency shutdown — intake stopped, reservoir draining</span>
+    <button type="button" id="release-shutdown" class="act act-release"
+            title="Lift the shutdown so the intake refills. Leaves pumps, valves and work orders exactly as they are.">
+      Release
+    </button>
+  </div>
   <div class="mast-right">
     <span class="tick" id="conn">connecting…</span>
     <span class="lamp" id="lamp-live"></span>
@@ -119,9 +126,13 @@
   <span id="ns"></span>
   <span class="foot-note">Simulated plant · all systems and data are fictional</span>
   <div class="foot-actions">
+    <select id="attack-choice" class="act-select"
+            title="Which attack to run. Held cases are listed with the reason they cannot run.">
+      <option value="">Random armed attack</option>
+    </select>
     <button type="button" id="run-attack" class="act act-attack"
-            title="Fire one of the armed attacks at the agent now, instead of waiting for the timer">
-      <span class="ico">⚡</span><span class="lbl">Run random attack</span>
+            title="Fire the selected attack at the agent now">
+      <span class="ico">⚡</span><span class="lbl">Run attack</span>
     </button>
     <button type="button" id="run-evals" class="act act-eval"
             title="Run every armed evaluation against the agent and score the result">

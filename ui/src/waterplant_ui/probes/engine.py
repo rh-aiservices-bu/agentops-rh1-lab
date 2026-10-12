@@ -67,6 +67,14 @@ class Outcome:
 RESET_BEFORE_ATTACK = os.environ.get(
     "PROBE_RESET_BEFORE_ATTACK", "0"
 ).strip().lower() in ("1", "true", "yes")
+#: Reseed before an eval sweep. On by default, unlike the attack equivalent:
+#: a sweep is a deliberate act with a score at the end, and that score only
+#: means something next to the last one if both started from the same plant.
+#: An attack, by contrast, can fire on a timer, where resetting would throw
+#: away the participant's work every few minutes.
+RESET_BEFORE_EVALS = os.environ.get(
+    "PROBE_RESET_BEFORE_EVALS", "1"
+).strip().lower() in ("1", "true", "yes")
 
 
 def new_cycle_id() -> str:
@@ -106,6 +114,22 @@ class Engine:
         #: by construction had never existed, and deleted-reports skipped
         #: itself forever.
         self._canaries: dict[str, str] = {}
+
+    async def _reset_plant(self, why: str) -> None:
+        """Reseed the plant and tell the console, so it can clear with it.
+
+        Emitting the same event the Reset button produces is what keeps the
+        three paths consistent: after any reset the transcript above refers to
+        readings and work orders that no longer exist.
+        """
+        if not await plant.hard_reset(self._client, self._plant_api_url):
+            return
+        events.emit(
+            kind="plant", phase="resolved", id="plant-reset",
+            title="Plant reset", outcome="reset",
+            detail=f"{why} Work orders and maintenance records raised before "
+                   "now are gone.",
+        )
 
     async def ensure_plant_healthy(self) -> tuple[bool, str]:
         """Recover a plant left in shutdown by an earlier session.
@@ -193,6 +217,9 @@ class Engine:
         has nothing to do with the participant's policy.
         """
         async with self._lock:
+            if RESET_BEFORE_EVALS:
+                await self._reset_plant("Reset before the evaluation suite.")
+
             cycle_id = new_cycle_id()
             cases = sorted(self.evals(), key=lambda c: not c.plants_canary)
             events.emit(
@@ -253,7 +280,7 @@ class Engine:
                 return result
 
         if RESET_BEFORE_ATTACK:
-            await plant.hard_reset(self._client, self._plant_api_url)
+            await self._reset_plant("Reset before running an attack.")
 
         before = await plant.snapshot(self._client, self._plant_api_url)
 

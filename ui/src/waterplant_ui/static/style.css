@@ -1010,3 +1010,66 @@ body {
   color: var(--led-amber); text-decoration: none;
 }
 .t-trace:hover { text-decoration: underline; }
+
+/* ── attack picker ───────────────────────────────────────── */
+.act-select {
+  font-family: var(--display); font-size: .62rem; font-weight: 600;
+  letter-spacing: .1em; text-transform: uppercase;
+  max-width: 230px; padding: 6px 9px; border-radius: 3px; cursor: pointer;
+  color: var(--label);
+  background: linear-gradient(180deg, #3b4e58 0%, #2a3942 52%, #223038 100%);
+  border: 1px solid #16232a;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.14), 0 2px 3px rgba(0,0,0,.45);
+}
+.act-select:focus-visible { outline: 2px solid var(--led-amber); outline-offset: 2px; }
+.act-select:disabled { opacity: .42; cursor: not-allowed; }
+.act-select option:disabled { color: var(--label-dim); }
+
+/* ── emergency shutdown ──────────────────────────────────── */
+/* The plant state that gets worse the longer it is missed: the intake
+   controller stops and the reservoir drains from here on. A red row in the
+   safety list is easy to lose on a panel that is already amber, so the whole
+   console takes the alarm. */
+body.plant-shutdown .plate {
+  border-color: rgba(255, 77, 61, .85);
+  box-shadow:
+    0 0 0 1px rgba(255, 77, 61, .55),
+    0 0 18px rgba(255, 77, 61, .28),
+    inset 0 1px 0 var(--edge-hi);
+}
+body.plant-shutdown .mast {
+  animation: shutdown-pulse 1.6s ease-in-out infinite;
+}
+body.plant-shutdown .mast h1 { color: #ffd9d3; }
+/* A real element, not .mast::after: .plate/.riveted already use ::after for
+   the corner rivets and position it absolutely, so a grid-area on it is
+   ignored and the banner ends up wrapped into a vertical ribbon against the
+   right edge. */
+.mast-alarm {
+  grid-area: 2 / 1 / 3 / 4;
+  justify-self: center;
+  white-space: nowrap;
+  margin-top: 2px;
+  font-size: .72rem; font-weight: 600; letter-spacing: .2em;
+  text-transform: uppercase;
+  color: var(--crit);
+  text-shadow: 0 0 10px rgba(255, 77, 61, .6);
+}
+.mast-alarm[hidden] { display: none; }
+@keyframes shutdown-pulse {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(255,77,61,.55), 0 0 14px rgba(255,77,61,.25); }
+  50%      { box-shadow: 0 0 0 2px rgba(255,77,61,.95), 0 0 30px rgba(255,77,61,.55); }
+}
+@media (prefers-reduced-motion: reduce) {
+  body.plant-shutdown .mast { animation: none; }
+}
+
+/* Release control, inside the shutdown banner. */
+.mast-alarm { display: flex; align-items: center; gap: 12px; }
+.act-release {
+  font-size: .58rem; padding: 3px 10px;
+  color: #ffd9d3;
+  background: linear-gradient(180deg, #7a2a22 0%, #5a1d17 52%, #451410 100%);
+  border-color: rgba(255, 77, 61, .75);
+}
+.act-release:hover:not(:disabled) { filter: brightness(1.25); }

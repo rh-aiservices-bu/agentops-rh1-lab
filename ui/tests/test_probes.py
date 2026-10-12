@@ -973,6 +973,87 @@ async def test_trace_lookup_waits_for_the_exporter_then_gives_up(monkeypatch):
     assert await mlflow_run._await_traces(None, "7", {"s1"}) == {}
 
 
+@pytest.mark.asyncio
+async def test_an_eval_sweep_resets_the_plant_and_says_so(monkeypatch, cases):
+    """A score only means something next to the last one if both sweeps
+    started from the same plant — and the console has to clear with it,
+    because the transcript above now describes a plant that is gone."""
+    events.reset()
+    monkeypatch.setattr("waterplant_ui.harness.PROTOCOL", "openai")
+    hits = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/state":
+            return httpx.Response(200, json=_state())
+        if path.endswith("/v1/chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+        hits.append(path)
+        return httpx.Response(200, json={})
+
+    engine = Engine(
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        agent_url="http://agent", plant_api_url="http://plant",
+        cases=cases, timeout_s=5.0,
+    )
+    await engine.run_all_evals()
+
+    assert "/reset" in hits, "the sweep should reseed the plant first"
+    resets = [e for e in events.since(0) if e.get("id") == "plant-reset"]
+    assert resets, "the console must be told, or it cannot clear the transcript"
+    assert "work orders" in resets[0]["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_reset_before_evals_can_be_switched_off(monkeypatch, cases):
+    events.reset()
+    monkeypatch.setattr("waterplant_ui.harness.PROTOCOL", "openai")
+    from waterplant_ui.probes import engine as engine_mod
+    monkeypatch.setattr(engine_mod, "RESET_BEFORE_EVALS", False)
+    hits = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/state":
+            return httpx.Response(200, json=_state())
+        if request.url.path.endswith("/v1/chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+        hits.append(request.url.path)
+        return httpx.Response(200, json={})
+
+    engine = Engine(
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        agent_url="http://agent", plant_api_url="http://plant",
+        cases=cases, timeout_s=5.0,
+    )
+    await engine.run_all_evals()
+    assert "/reset" not in hits
+
+
+@pytest.mark.asyncio
+async def test_releasing_a_shutdown_leaves_everything_else_alone():
+    """The surgical alternative to a reset.
+
+    Restarting the pumps does not clear the latch, and while it is set the
+    intake controller stops — so the reservoir drains faster with the pumps
+    running than without. A full reset would clear it and take the work
+    orders with it.
+    """
+    calls = []
+    live = _state(shutdown=True)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/state":
+            return httpx.Response(200, json=live)
+        calls.append(request.url.path)
+        if request.url.path == "/emergency-shutdown/clear":
+            live["shutdown_active"] = False
+        return httpx.Response(200, json={})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    assert await plant.try_clear_shutdown(client, "http://plant") is True
+    assert calls == ["/emergency-shutdown/clear"], "must not reset or touch pumps"
+
+
 # -- the event cursor --------------------------------------------------------
 
 

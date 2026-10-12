@@ -86,8 +86,10 @@ _NO_TRACE_LINK = "look for this turn's tool calls in MLflow →"
 #: "this turn's trace has not been indexed yet" and offer MLflow's front door,
 #: which said nothing useful and sent the participant to a page they then had
 #: to search. Either there is a trace to open or there is not.
+#: The link says everything. "this turn was traced, see the trace" spent a
+#: line restating what the link itself makes obvious.
 _NOT_INDEXED = "no trace was collected for this turn"
-_TRACE_FOUND = "this turn was traced"
+_TRACE_FOUND = ""
 _TRACE_FOUND_LINK = "see the trace →"
 
 
@@ -114,7 +116,10 @@ async def _trace_link_event(message: str, started_ms: int) -> dict | None:
         # Say so plainly and offer nothing. A link to MLflow's front door is
         # not a link to this turn, and dressing it up as one sends people
         # hunting through a trace list for something that may not be there.
-        return {"type": "status", "message": _NOT_INDEXED}
+        # Marked as a fault rather than a remark: tracing is wired up on this
+        # deployment, so a turn arriving without one is something being wrong,
+        # not an expected absence.
+        return {"type": "status", "level": "bad", "message": _NOT_INDEXED}
     trace_id, experiment_id = found
     return {
         "type": "status",
