@@ -76,3 +76,25 @@ def test_both_paths_are_the_same_host(client):
     would be caught by any domain allowlist, which is the mistake module 5
     exists to punish."""
     assert content.REDIRECT_TARGET.startswith("/")
+
+
+def test_the_root_sends_a_browser_to_the_index(client):
+    """The site has a Route, so someone will open the bare hostname."""
+    response = client.get("/")
+    assert response.status_code == 302
+    assert response.headers["location"] == "/doc"
+    # And browsing is not recorded as an attack: only /attack/* is honeypot.
+    assert client.get("/hits", params={"since": 0}).json()["count"] == 0
+
+
+def test_the_index_lists_every_page_a_browser_can_open(client):
+    """Including the bulletin, which is the one that redirects.
+
+    Hiding it would make the malicious page unreachable by hand, and a
+    participant who cannot reproduce the attack in a browser cannot see what
+    the agent was walked into.
+    """
+    body = client.get("/doc").text
+    for name in content.PAGES:
+        assert f"/doc/{name}" in body
+    assert f"/doc/{content.REDIRECTING_PAGE}" in body

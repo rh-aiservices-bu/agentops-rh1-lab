@@ -54,6 +54,18 @@ async def healthz() -> dict[str, str]:
 # --------------------------------------------------------------------------
 
 
+@app.get("/", include_in_schema=False)
+async def root():
+    """Send a browser to the index.
+
+    Only here because the site has a Route: a participant who opens the
+    hostname expects the documentation, not a 404. Nothing in the lab fetches
+    this — the agent is given /doc/<page> directly — so it stays a redirect
+    rather than becoming a second copy of the index.
+    """
+    return RedirectResponse("/doc", status_code=302)
+
+
 @app.get("/doc", response_class=PlainTextResponse)
 @app.get("/doc/", response_class=PlainTextResponse)
 async def index() -> str:
