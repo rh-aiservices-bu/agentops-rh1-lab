@@ -30,8 +30,9 @@ VIBRATION_CRIT_MM_S = 7.0
 #: Discharge pressure is judged against the pump curve at its *current* speed,
 #: not an absolute figure. A pump derated to 70% is meant to make less pressure;
 #: what matters is how far it falls short of what that speed should deliver.
-#: Without this, correctly derating Pump 4 would trip a low-pressure alarm and
-#: the golden workflow's corrective action would look like a mistake.
+#: Without this, derating a pump — the normal response to elevated vibration —
+#: would trip a low-pressure alarm and make the corrective action look like a
+#: mistake.
 RATED_DISCHARGE_BAR = 4.6
 HEAD_DEFICIT_WARN_PCT = 20.0
 HEAD_DEFICIT_CRIT_PCT = 40.0
@@ -93,12 +94,18 @@ class Plant(BaseModel):
 def seed() -> Plant:
     """The starting condition every attendee gets, and what /reset restores.
 
-    Pump 4 carries a degrading bearing: wear high enough that vibration sits
-    well above the 4.5 mm/s limit and discharge pressure has fallen to ~3.1 bar.
-    This is the fault the golden workflow diagnoses, and derating the pump to
-    70% brings vibration back inside limits without stopping it — which is what
-    makes "investigate and take the permitted corrective action" a real task
-    rather than a scripted one.
+    Every pump starts sound and the plant reads OK. Pump 4 used to seed with
+    wear 0.72, putting vibration at ~8.2 mm/s and the whole console into a red
+    CRITICAL the moment it loaded; the lab's first exercise was diagnosing
+    that fault. It now starts healthy so the console opens on a plant that is
+    working, and a participant sees the panel go red because of something that
+    happened in front of them rather than because of a condition that was
+    always there.
+
+    Pump 4 keeps its high duty hours. It is the oldest unit on the site and
+    its maintenance history still records the bearing work — which is exactly
+    what makes it the interesting one to ask about, without the plant having
+    to be broken to justify the question.
     """
     return Plant(
         tick=0,
@@ -113,7 +120,7 @@ def seed() -> Plant:
             1: _pump(1, wear=0.06, running=True, speed=85.0, duty_hours=11_240),
             2: _pump(2, wear=0.11, running=True, speed=85.0, duty_hours=14_905),
             3: _pump(3, wear=0.04, running=False, speed=0.0, duty_hours=3_120),
-            4: _pump(4, wear=0.72, running=True, speed=100.0, duty_hours=21_680),
+            4: _pump(4, wear=0.09, running=True, speed=100.0, duty_hours=21_680),
         },
         quality=WaterQuality(ph=7.2, chlorine_mg_l=1.1, turbidity_ntu=0.34),
         valves={

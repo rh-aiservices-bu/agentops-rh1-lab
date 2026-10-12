@@ -11,7 +11,7 @@
 
 <header class="mast plate riveted">
   <span class="screws"></span>
-  <div>
+  <div class="mast-title">
     <span class="site engraved">Northgate Water Treatment Works</span>
     <h1>Operator Console</h1>
   </div>
@@ -28,100 +28,118 @@
   </div>
 </header>
 
+<!-- Two full-height columns rather than stacked rows. The chat pane needs
+     most of a screen on its own; running it beside the plant instead of under
+     it is what lets the whole console fit in one viewport, and it means a
+     participant watches the gauges move while reading what the agent claims
+     it did. -->
 <main class="grid">
 
-  <section class="plate riveted c6">
-    <span class="screws"></span>
-    <div class="plate-hd engraved">Reservoir &amp; Flows</div>
-    <div class="plate-bd">
-      <div class="reservoir">
-        <div class="gauge-wrap" id="g-reservoir"></div>
-        <div class="flow-rows">
-          <div class="flow-row"><span class="k engraved">Inflow</span>
-            <span class="lcd" id="inflow">—</span><span class="u">%/s</span></div>
-          <div class="flow-row"><span class="k engraved">Outflow</span>
-            <span class="lcd" id="outflow">—</span><span class="u">%/s</span></div>
-          <div class="flow-row"><span class="k engraved">Capacity</span>
-            <span class="lcd" id="capacity">—</span><span class="u">m³</span></div>
+  <div class="col col-plant">
+
+    <div class="row">
+      <section class="plate riveted">
+        <span class="screws"></span>
+        <div class="plate-hd engraved">Reservoir</div>
+        <div class="plate-bd">
+          <div class="reservoir">
+            <div class="gauge-wrap" id="g-reservoir"></div>
+            <div class="turbidity" id="turbidity-aside"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="plate riveted">
+        <span class="screws"></span>
+        <div class="plate-hd engraved">Valves</div>
+        <div class="plate-bd">
+          <div class="valves" id="valves"></div>
+        </div>
+      </section>
+    </div>
+
+    <section class="plate riveted grow">
+      <span class="screws"></span>
+      <div class="plate-hd engraved">Pumps</div>
+      <div class="plate-bd">
+        <div class="pumps" id="pumps"></div>
+      </div>
+    </section>
+
+    <section class="plate riveted">
+      <span class="screws"></span>
+      <div class="plate-hd engraved">Safety Envelope
+        <span class="aside">Advisory — not enforced</span>
+      </div>
+      <div class="plate-bd">
+        <div class="checks" id="checks"></div>
+      </div>
+    </section>
+
+  </div>
+
+  <div class="col col-chat">
+    <section class="plate riveted chat-plate">
+      <span class="screws"></span>
+      <div class="plate-hd engraved">Maintenance Assistant
+        <div class="hd-controls">
+          <button type="button" id="phosphor" class="phosphor-btn"
+                  title="Display mode: amber, green, or readable (standard fonts, no CRT effects)">
+            <span class="dot"></span><span class="lbl" id="phosphor-label">Amber</span>
+          </button>
+          <label class="trace-switch" title="Show each tool call the agent makes, as it happens">
+            <input type="checkbox" id="trace-toggle" checked>
+            <span class="sw"><span class="knob"></span></span>
+            <span class="lbl">Agent trace</span>
+          </label>
+          <select id="persona" class="persona" title="Requesting identity">
+            <option value="anonymous">Anonymous</option>
+            <option value="operator" selected>Plant Operator</option>
+            <option value="engineer">Maintenance Engineer</option>
+            <option value="administrator">Plant Administrator</option>
+          </select>
         </div>
       </div>
-    </div>
-  </section>
-
-  <section class="plate riveted c6">
-    <span class="screws"></span>
-    <div class="plate-hd engraved">Water Quality</div>
-    <div class="plate-bd">
-      <div class="quality" id="quality"></div>
-    </div>
-  </section>
-
-  <section class="plate riveted c12">
-    <span class="screws"></span>
-    <div class="plate-hd engraved">Pumps</div>
-    <div class="plate-bd">
-      <div class="pumps" id="pumps"></div>
-    </div>
-  </section>
-
-  <section class="plate riveted c6">
-    <span class="screws"></span>
-    <div class="plate-hd engraved">Valves</div>
-    <div class="plate-bd">
-      <div class="valves" id="valves"></div>
-    </div>
-  </section>
-
-  <section class="plate riveted c6">
-    <span class="screws"></span>
-    <div class="plate-hd engraved">Safety Envelope
-      <span class="aside">Advisory — not enforced</span>
-    </div>
-    <div class="plate-bd">
-      <div class="checks" id="checks"></div>
-    </div>
-  </section>
-
-  <section class="plate riveted c12 chat-plate">
-    <span class="screws"></span>
-    <div class="plate-hd engraved">Maintenance Assistant
-      <div class="hd-controls">
-        <button type="button" id="phosphor" class="phosphor-btn"
-                title="Display mode: amber, green, or readable (standard fonts, no CRT effects)">
-          <span class="dot"></span><span class="lbl" id="phosphor-label">Amber</span>
-        </button>
-        <label class="trace-switch" title="Show each tool call the agent makes, as it happens">
-          <input type="checkbox" id="trace-toggle" checked>
-          <span class="sw"><span class="knob"></span></span>
-          <span class="lbl">Agent trace</span>
-        </label>
-        <select id="persona" class="persona" title="Requesting identity">
-          <option value="anonymous">Anonymous</option>
-          <option value="operator" selected>Plant Operator</option>
-          <option value="engineer">Maintenance Engineer</option>
-          <option value="administrator">Plant Administrator</option>
-        </select>
+      <div class="crt">
+        <div class="chat" id="chat"></div>
       </div>
-    </div>
-    <div class="crt">
-      <div class="chat" id="chat"></div>
-    </div>
-    <form class="composer" id="composer">
-      <span class="sigil" id="sigil">operator@northgate ~ %</span>
-      <input id="prompt" autocomplete="off"
-             placeholder="why is pump 4 losing pressure?">
-      <button type="submit" id="send">Send</button>
-    </form>
-  </section>
+      <form class="composer" id="composer">
+        <span class="sigil" id="sigil">operator@northgate ~ %</span>
+        <input id="prompt" autocomplete="off"
+               placeholder="why is pump 4 losing pressure?">
+        <button type="submit" id="send">Send</button>
+      </form>
+    </section>
+  </div>
 
 </main>
 
 <footer class="foot plate riveted">
   <span class="screws"></span>
   <span id="ns"></span>
-  <span>Simulated plant · all systems and data are fictional</span>
-  <a id="mlflow-link" href="#" hidden>MLflow traces →</a>
+  <span class="foot-note">Simulated plant · all systems and data are fictional</span>
+  <div class="foot-actions">
+    <button type="button" id="run-attack" class="act act-attack"
+            title="Fire one of the armed attacks at the agent now, instead of waiting for the timer">
+      <span class="ico">⚡</span><span class="lbl">Run random attack</span>
+    </button>
+    <button type="button" id="run-evals" class="act act-eval"
+            title="Run every armed evaluation against the agent and score the result">
+      <span class="ico">✓</span><span class="lbl">Run all evals</span>
+    </button>
+    <button type="button" id="reset-plant" class="act act-reset"
+            title="Restore the plant to its seeded starting state. Also discards every work order and maintenance record raised since the last reset.">
+      <span class="ico">⟲</span><span class="lbl">Reset plant</span>
+    </button>
+  </div>
+  <a id="mlflow-link" href="#" target="_blank" rel="noopener" hidden>MLflow traces →</a>
 </footer>
+
+<!-- Attack and eval notifications. Fixed above everything so a toast is
+     visible no matter which panel has focus; polite rather than assertive
+     because an attack landing must not interrupt someone mid-sentence in the
+     composer. -->
+<div class="toasts" id="toasts" role="status" aria-live="polite" aria-label="Attack and evaluation notifications"></div>
 
 <script src="/static/app.js"></script>
 </body>

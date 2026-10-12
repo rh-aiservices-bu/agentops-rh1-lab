@@ -82,9 +82,13 @@ _NO_TRACE = (
 #: `hermes_otel` plugin does export TOOL spans, but the protocol is "any
 #: OpenAI-compatible server" and a different one may trace nothing.
 _NO_TRACE_LINK = "look for this turn's tool calls in MLflow →"
-_NOT_INDEXED = "this turn's trace has not been indexed yet"
-_TRACE_FOUND = "tool calls for this turn were traced"
-_TRACE_FOUND_LINK = "open the trace →"
+#: Shown when the turn produced no trace we can point at. It used to read
+#: "this turn's trace has not been indexed yet" and offer MLflow's front door,
+#: which said nothing useful and sent the participant to a page they then had
+#: to search. Either there is a trace to open or there is not.
+_NOT_INDEXED = "no trace was collected for this turn"
+_TRACE_FOUND = "this turn was traced"
+_TRACE_FOUND_LINK = "see the trace →"
 
 
 def _no_trace_event() -> dict | None:
@@ -107,16 +111,10 @@ async def _trace_link_event(message: str, started_ms: int) -> dict | None:
         return None
     found = await traces.find_trace(message, started_ms)
     if not found:
-        # The turn happened; only the link is missing. Fall back to MLflow's
-        # front door rather than going silent, so the participant still knows
-        # where the tool calls went.
-        if MLFLOW_URL:
-            return {
-                "type": "status",
-                "message": _NOT_INDEXED,
-                "link": {"href": traces.root_url(), "text": _NO_TRACE_LINK},
-            }
-        return None
+        # Say so plainly and offer nothing. A link to MLflow's front door is
+        # not a link to this turn, and dressing it up as one sends people
+        # hunting through a trace list for something that may not be there.
+        return {"type": "status", "message": _NOT_INDEXED}
     trace_id, experiment_id = found
     return {
         "type": "status",

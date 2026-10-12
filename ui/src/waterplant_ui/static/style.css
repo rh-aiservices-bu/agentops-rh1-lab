@@ -60,9 +60,29 @@
 
 * { box-sizing: border-box; }
 
+/* Panel type scale.
+   Everything outside the terminal was sized for a 12-column desktop layout
+   and became genuinely hard to read once the plant moved into a 42% column:
+   gauge captions and LCD labels had ended up at .5-.62rem. These multiply the
+   whole panel scale in one place rather than re-tuning forty declarations.
+   The CRT is deliberately excluded — it has its own scale, and the phosphor
+   font at a larger size costs transcript lines. */
+:root { --ui-scale: 1.18; }
+html { font-size: calc(100% * var(--ui-scale)); }
+
 body {
   margin: 0;
-  min-height: 100vh;
+  /* The console is a single screen. Locking the body to the viewport and
+     making the transcript the only scrolling region is the whole point: a
+     participant watching an attack land must not have to scroll between the
+     gauges and the chat pane that caused it.
+
+     dvh rather than vh so a mobile browser's collapsing toolbar does not leave
+     a strip of the footer permanently below the fold. */
+  height: 100dvh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
   font-family: var(--display);
   color: var(--label);
   background:
@@ -111,20 +131,53 @@ body {
 }
 
 /* ── masthead ────────────────────────────────────────────── */
+/* Three tracks so the title is centred on the plate, not just centred within
+   its own box. With flex and space-between it sat hard left, which is what
+   made the two lines read as a label stuck to the corner.
+
+   The outer tracks are equal, so the middle one lands on the plate's centre
+   line regardless of how wide the status block gets — up to the point where
+   the status block outgrows its share, after which the title shifts rather
+   than colliding with it.
+
+   .screws is placed too: it is an in-flow span whose rivets are its
+   pseudo-elements, so left to itself it would take a track of its own and
+   push everything one cell right. */
 .mast {
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 24px; flex-wrap: wrap;
-  margin: 14px clamp(10px, 1.6vw, 20px) 0;
-  padding: 14px 22px;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 24px; flex: none;
+  margin: 10px clamp(8px, 1.1vw, 14px) 0;
+  padding: 8px 20px;
+}
+.mast > .screws { grid-area: 1 / 1; }
+.mast-title     { grid-area: 1 / 2; }
+.mast-right     { grid-area: 1 / 3; justify-self: end; }
+
+/* Below this the status block and the title cannot share a line without one
+   of them being squeezed, so stack and centre both. */
+@media (max-width: 1100px) {
+  .mast { grid-template-columns: 1fr; justify-items: center; gap: 10px; }
+  .mast-title { grid-area: auto; }
+  .mast-right { grid-area: auto; justify-self: center; }
 }
 .mast h1 {
   margin: 0; font-size: clamp(1.7rem, 3.4vw, 2.5rem); font-weight: 600;
   letter-spacing: .07em; text-transform: uppercase; color: #e4d9bb;
   text-shadow: 0 2px 0 rgba(0,0,0,.7), 0 -1px 0 rgba(255,255,255,.07);
 }
+/* The site name and the console name are one title, so they share a centre
+   line. Left-aligned they read as two unrelated labels that happen to start
+   at the same x, which is what the wider tracking on the smaller line makes
+   so obvious. */
+.mast-title { text-align: center; }
 .mast .site {
-  display: block; font-size: .78rem; font-weight: 500; letter-spacing: .22em;
+  display: block; font-size: .92rem; font-weight: 500; letter-spacing: .22em;
   color: var(--label-dim);
+  /* Tracking adds space after the final letter but not before the first, so
+     a centred tracked line sits visibly left of true centre. */
+  text-indent: .22em;
 }
 .mast-right { display: flex; align-items: center; gap: 16px; }
 
@@ -172,18 +225,71 @@ body {
   box-shadow: 0 0 12px 3px rgba(255,77,61,.8), inset 0 -2px 3px rgba(0,0,0,.45), 0 0 0 2px rgba(0,0,0,.5); }
 
 /* ── layout ──────────────────────────────────────────────── */
+/* Plant on the left, assistant on the right, both full height.
+   The old 12-column row grid stacked the chat panel's ~690px underneath the
+   plant's ~1000px, which is how the page came to be two viewports tall. Run
+   side by side, the chat's height overlaps the plant panels instead of
+   following them and the whole console fits.
+
+   min-height: 0 everywhere a flex or grid child contains the transcript:
+   without it a flex item refuses to shrink below its content and the
+   transcript pushes the column past the viewport instead of scrolling. */
 .grid {
-  display: grid; grid-template-columns: repeat(12, 1fr);
-  gap: clamp(10px, 1.2vw, 16px);
-  padding: clamp(10px, 1.6vw, 20px);
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 0.42fr) minmax(0, 0.58fr);
+  gap: clamp(8px, 1.1vw, 14px);
+  padding: clamp(8px, 1.1vw, 14px);
 }
-.c6  { grid-column: span 6; }
-.c12 { grid-column: span 12; }
-@media (max-width: 980px) { .c6 { grid-column: span 12; } }
+.col { display: flex; flex-direction: column; gap: clamp(8px, 1.1vw, 14px); min-height: 0; }
+/* Explicit rows rather than flex, so the pumps panel is the only thing that
+   grows and the two fixed panels cannot squeeze it below legibility. At
+   1280x800 a flex column handed the pumps ~145px for four rows and they
+   collapsed into each other. */
+.col-plant {
+  display: grid;
+  grid-template-rows: minmax(0, auto) minmax(0, 1fr) minmax(0, auto);
+}
+/* The two fixed panels are capped so the pumps panel always keeps enough
+   height for one legible row per pump. Without the caps, at 1280x800 the
+   reservoir/valves row and the safety list between them took everything and
+   the pumps panel clipped half the plant out of view — a dashboard silently
+   hiding two of four pumps is the worst failure this layout could have. */
+.col-plant > .row { max-height: clamp(190px, 26vh, 260px); }
+.col-plant > .plate:last-child { max-height: clamp(140px, 18vh, 240px); }
+.col > .plate, .col .row > .plate { display: flex; flex-direction: column; min-height: 0; }
+/* The pumps panel takes whatever vertical space the fixed-height panels
+   around it leave over, so the layout absorbs a taller or shorter viewport
+   there rather than overflowing. */
+.col > .plate.grow { flex: 1; }
+.col > .plate.grow > .plate-bd { flex: 1; min-height: 0; }
+/* minmax(0, 1fr), not 1fr. A 1fr track floors at its content's min-content
+   width, and the valve rows are nowrap — so at 1280px the valves panel grew
+   past the left column and painted over the chat pane. */
+.row {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: clamp(8px, 1.1vw, 14px); min-height: 0;
+}
+.row > .plate { min-width: 0; }
+.col-chat { min-height: 0; }
+.col-chat > .chat-plate { flex: 1; min-height: 0; }
+
+/* Below this the two columns cannot both be usable, so fall back to the
+   stacked layout and let the page scroll. A hard no-scroll promise at phone
+   widths is not compatible with a chat pane anyone can type into. */
+@media (max-width: 1100px) {
+  body { height: auto; overflow: auto; }
+  .grid { grid-template-columns: 1fr; }
+  .crt { height: clamp(280px, 44vh, 560px); flex: none; }
+}
+@media (max-width: 760px) {
+  .row { grid-template-columns: 1fr; }
+}
 
 .plate-hd {
-  text-align: center; padding: 10px 40px 8px;
-  min-height: 38px;
+  text-align: center; padding: 7px 40px 6px;
+  min-height: 30px; flex: none;
   font-size: .95rem; font-weight: 600; letter-spacing: .26em;
   color: var(--label);
   border-bottom: 1px solid rgba(0,0,0,.5);
@@ -195,7 +301,21 @@ body {
   font-size: .62rem; letter-spacing: .16em; color: var(--label-dim);
   font-weight: 400;
 }
-.plate-bd { padding: 16px 20px 20px; }
+.plate-bd { padding: 12px 16px 14px; }
+/* Inside the fixed-height left column a panel body must contain itself:
+   an overflowing .plate-bd paints straight over the panel beneath it, which
+   is how the pumps panel ended up on top of the valves.
+
+   `auto` rather than `hidden` deliberately. Sized as they are, none of these
+   ever scroll — but the failure modes differ completely. `hidden` fails by
+   silently removing content from the screen, and a plant dashboard quietly
+   dropping two of its four pumps is the worst thing this layout could do.
+   `auto` fails by showing a scrollbar: ugly, obvious, and recoverable.
+
+   The caps above are vh-based for the same reason: fixed pixel caps bound at
+   every viewport, so a 1080p screen with room to spare still showed a
+   scrollbar on the valves. */
+.col .plate-bd { overflow-y: auto; overflow-x: hidden; min-height: 0; }
 
 /* ── recessed LCD readout ────────────────────────────────── */
 .lcd {
@@ -220,28 +340,40 @@ body {
 }
 
 /* ── reservoir ───────────────────────────────────────────── */
-.reservoir { display: flex; gap: 24px; align-items: center; flex-wrap: wrap; }
-.reservoir .gauge-wrap { width: 168px; flex: none; }
-.flow-rows { display: flex; flex-direction: column; gap: 10px; flex: 1; min-width: 220px; }
-.flow-row { display: grid; grid-template-columns: 1fr auto auto; gap: 12px; align-items: center; }
-.flow-row .k { font-size: .78rem; letter-spacing: .16em; color: var(--label); }
-.flow-row .u { font-size: .68rem; color: var(--label-dim); min-width: 28px; }
-
-/* ── water quality ───────────────────────────────────────── */
-.quality { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
-.quality .cell { display: flex; flex-direction: column; align-items: center; gap: 8px; }
-.quality .gauge-wrap { width: 100%; max-width: 132px; }
+.reservoir {
+  display: flex; justify-content: center; align-items: center;
+  gap: clamp(8px, 1.4vw, 18px); height: 100%; flex-wrap: nowrap;
+}
+.reservoir .gauge-wrap { width: clamp(84px, 8vw, 108px); flex: none; }
+/* Turbidity sits beside the reservoir dial rather than in a panel of its own.
+   It is one number, and it is the only water-quality reading the safety
+   envelope actually checks — pH never moved off 7.2 and chlorine only
+   responds to the emergency bypass, so both rendered a hardcoded "ok" no
+   matter what the plant was doing. This one goes amber and red for real. */
+.turbidity { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+.turbidity .k { font-size: .55rem; letter-spacing: .14em; color: var(--label-dim); }
 
 /* ── pumps ───────────────────────────────────────────────── */
-.pumps { display: grid; grid-template-columns: repeat(auto-fit, minmax(258px, 1fr)); gap: 14px; }
-.pump { padding: 13px 15px 16px; border-radius: 4px; }
-.pump-hd { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.pump-hd .nm { font-size: 1.05rem; font-weight: 600; letter-spacing: .12em; }
-.pump-hd .model { display: block; font-size: .62rem; letter-spacing: .1em; color: var(--label-dim); }
-.pump-hd .right { display: flex; align-items: center; gap: 8px; }
+/* Pumps as stacked rows. Four of them have to fit a column roughly 660px
+   wide and ~300px tall, which rules out the two-dial card: side by side the
+   cards got ~160px each and the fourth wrapped out of the panel.
+   auto-fit on rows rather than a fixed count, so removing a pump in a later
+   round simply gives the remaining ones more height. */
+.pumps {
+  display: grid; gap: 6px; height: 100%;
+  grid-auto-rows: minmax(0, 1fr); align-content: stretch;
+}
+.pump {
+  display: grid; align-items: center; gap: 4px 12px;
+  grid-template-columns: minmax(0, auto) minmax(60px, 1fr) minmax(0, 1.5fr);
+  padding: 4px 11px; border-radius: 4px; min-height: 0; overflow: hidden;
+}
+.pump.idle { opacity: .72; }
+.pump-id { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pump-id .nm { font-size: .88rem; font-weight: 600; letter-spacing: .1em; white-space: nowrap; }
 .chip {
-  font-size: .6rem; font-weight: 500; letter-spacing: .14em; text-transform: uppercase;
-  padding: 2px 8px; border-radius: 2px;
+  font-size: .54rem; font-weight: 500; letter-spacing: .12em; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 2px; white-space: nowrap;
   border: 1px solid currentColor; color: var(--label-dim);
   background: rgba(0,0,0,.35);
 }
@@ -249,22 +381,57 @@ body {
 .chip.warn { color: var(--warn); }
 .chip.critical { color: var(--crit); }
 
-.pump-gauges { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 12px 0 10px; }
-.pump-lcds { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.pump-lcds .cell { display: flex; flex-direction: column; align-items: center; gap: 4px; }
-.pump-lcds .k { font-size: .6rem; letter-spacing: .16em; color: var(--label-dim); }
-.pump-lcds .lcd { width: 100%; min-width: 0; justify-content: center; }
+/* Speed as a bar. It is a commanded 0-100 value; nobody needs to read it off
+   a needle, and a bar shows "derated to 70%" without being read at all. */
+/* Flex, not grid. With grid, hiding the label at narrow widths removed it
+   as a grid item and the bar slid into the `auto` track — an empty span, so
+   it collapsed to 2px and the speed reading vanished. Flex degrades cleanly
+   when a child is display:none. */
+.pump-speed { display: flex; gap: 7px; align-items: center; min-width: 0; }
+.pump-speed .k { font-size: .54rem; letter-spacing: .14em; color: var(--label-dim); }
+.pump-speed .pc {
+  font-family: var(--lcd); font-size: .74rem; color: var(--label);
+  min-width: 36px; text-align: right; flex: none;
+}
+.pump-speed .k { flex: none; }
+.pump-speed .bar {
+  display: block; flex: 1; min-width: 34px;
+  height: 7px; border-radius: 2px; overflow: hidden;
+  background: rgba(0,0,0,.55);
+  border: 1px solid rgba(0,0,0,.6);
+  box-shadow: inset 0 1px 2px rgba(0,0,0,.8);
+}
+.pump-speed .bar > span {
+  display: block; height: 100%;
+  background: linear-gradient(180deg, #7fe39a, var(--ok));
+  box-shadow: 0 0 6px rgba(88,224,122,.5);
+}
+.pump-speed .bar.warn > span { background: linear-gradient(180deg, #ffd083, var(--warn)); box-shadow: 0 0 6px rgba(255,180,58,.5); }
+.pump-speed .bar.critical > span { background: linear-gradient(180deg, #ff8d80, var(--crit)); box-shadow: 0 0 6px rgba(255,77,61,.55); }
+
+.pump-lcds { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.pump-lcds .cell { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.pump-lcds .k { font-size: .5rem; letter-spacing: .12em; color: var(--label-dim); }
+.pump-lcds .lcd { width: 100%; min-width: 0; justify-content: center; font-size: .74rem; padding: 2px 5px; }
 
 /* ── valves ──────────────────────────────────────────────── */
 .valves { display: flex; flex-direction: column; gap: 10px; }
 .valve {
-  display: grid; grid-template-columns: 1fr auto auto auto; gap: 14px;
-  align-items: center; padding: 9px 14px; border-radius: 3px;
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 8px;
+  align-items: center; padding: 3px 9px; border-radius: 3px;
   background: linear-gradient(180deg, rgba(255,255,255,.035), rgba(0,0,0,.22));
   border: 1px solid rgba(0,0,0,.4);
   box-shadow: inset 0 1px 0 var(--edge-hi);
 }
-.valve .nm { font-size: .88rem; letter-spacing: .16em; }
+.valve .nm {
+  font-size: clamp(.56rem, .52vw, .7rem); letter-spacing: .05em;
+  line-height: 1.2; white-space: nowrap;
+}
+/* The word beside the lever says what the LCD two cells along already says,
+   and it was what pushed the LCD out of the panel below ~1400px. */
+.valve .toggle .state { display: none; }
+.valves { gap: 5px; }
+.valve .lcd { font-size: .68rem; padding: 2px 6px; white-space: nowrap; }
 .valve.danger {
   background: linear-gradient(180deg, rgba(255,77,61,.22), rgba(120,20,12,.3));
   border-color: rgba(255,77,61,.55);
@@ -322,7 +489,7 @@ body {
 .chat-plate { display: flex; flex-direction: column; }
 
 .persona {
-  font-family: var(--crt); font-size: .95rem; letter-spacing: .06em;
+  font-family: var(--crt); font-size: calc(.95rem / var(--ui-scale)); letter-spacing: .06em;
   text-transform: uppercase;
   background: var(--crt-bg); color: var(--phos);
   border: 1px solid rgba(0,0,0,.8); border-radius: 2px; padding: 2px 8px;
@@ -331,11 +498,14 @@ body {
 
 /* The screen itself, recessed behind a bezel. */
 .crt {
-  /* A definite height, not flex:1 against a content-sized parent. Without it
-     the panel grows with the transcript, .chat never overflows, and the page
-     scrolls instead of the screen — so there is no scrollbar to style. */
-  height: clamp(280px, 44vh, 560px);
-  position: relative; margin: 16px 20px; border-radius: 10px;
+  /* Was a clamped height, because the page scrolled and an unclamped panel
+     grew with the transcript until .chat never overflowed. Now that the body
+     is locked to the viewport the opposite is wanted: fill the column, and let
+     .chat be the one thing on the page that scrolls.
+     min-height: 0 is load-bearing — a flex item will not shrink below its
+     content without it, and the transcript would push the footer off-screen. */
+  flex: 1; min-height: 0;
+  position: relative; margin: 12px 16px; border-radius: 10px;
   background: radial-gradient(120% 130% at 50% 40%, var(--crt-inner) 0%, var(--crt-bg) 60%, var(--crt-edge) 100%);
   border: 1px solid #000;
   box-shadow:
@@ -366,7 +536,7 @@ body {
 .chat {
   position: relative; z-index: 1; height: 100%; overflow-y: scroll;
   padding: 16px 20px 20px;
-  font-family: var(--crt); font-size: 1.22rem; line-height: 1.42;
+  font-family: var(--crt); font-size: calc(1.22rem / var(--ui-scale)); line-height: 1.42;
   color: var(--phos); letter-spacing: .02em;
   text-shadow: 0 0 4px rgba(var(--phos-glow), .55), 0 0 14px rgba(var(--crt-bloom), .28);
   animation: flicker 5.5s infinite steps(1);
@@ -401,17 +571,17 @@ body {
   box-shadow: inset 0 2px 8px rgba(0,0,0,.9), 0 1px 0 var(--edge-hi);
 }
 .composer .sigil {
-  font-family: var(--crt); font-size: 1.15rem; color: var(--phos-dim);
+  font-family: var(--crt); font-size: calc(1.15rem / var(--ui-scale)); color: var(--phos-dim);
   text-shadow: 0 0 6px rgba(var(--phos-glow), .4); white-space: nowrap;
 }
 .composer input {
   flex: 1; background: transparent; border: 0; outline: 0; padding: 2px 0;
-  font-family: var(--crt); font-size: 1.18rem; letter-spacing: .02em;
+  font-family: var(--crt); font-size: calc(1.18rem / var(--ui-scale)); letter-spacing: .02em;
   color: var(--phos-hot); text-shadow: 0 0 5px rgba(var(--phos-glow), .5);
 }
 .composer input::placeholder { color: #6d4a1c; }
 .composer button {
-  font-family: var(--crt); font-size: 1.05rem; letter-spacing: .14em;
+  font-family: var(--crt); font-size: calc(1.05rem / var(--ui-scale)); letter-spacing: .14em;
   text-transform: uppercase; cursor: pointer; padding: 3px 16px; border-radius: 2px;
   color: var(--crt-bg); border: 1px solid rgba(0,0,0,.6);
   background: linear-gradient(180deg, var(--phos-hot), var(--phos-dim));
@@ -427,11 +597,12 @@ body {
 
 /* ── footer ──────────────────────────────────────────────── */
 .foot {
-  display: flex; gap: 10px 26px; flex-wrap: wrap; align-items: center;
-  margin: 0 clamp(10px, 1.6vw, 20px) 22px; padding: 12px 22px;
+  display: flex; gap: 8px 20px; flex-wrap: wrap; align-items: center; flex: none;
+  margin: 0 clamp(8px, 1.1vw, 14px) 10px; padding: 7px 20px;
   font-size: .66rem; letter-spacing: .16em; text-transform: uppercase;
   color: var(--label-dim);
 }
+.foot .foot-note { flex: 1; }
 .foot a { color: var(--led-amber); text-decoration: none; }
 .foot a:hover { text-decoration: underline; }
 
@@ -444,7 +615,7 @@ body {
 /* Live tool trace on the CRT. Dimmer than the prose so the agent's answer
    still reads as the primary content, but present enough that a participant
    can follow what it is doing. */
-.line.trace { font-size: 1.06rem; letter-spacing: .01em; margin-bottom: 3px; }
+.line.trace { font-size: calc(1.06rem / var(--ui-scale)); letter-spacing: .01em; margin-bottom: 3px; }
 .line.trace.dim  { color: var(--phos-dim); }
 .line.trace.call { color: var(--phos); text-shadow: 0 0 6px rgba(var(--phos-glow), .5); }
 .line.trace.ok   { color: var(--phos-dim); padding-left: 1.4em; }
@@ -459,10 +630,15 @@ body {
 /* Both header controls live in one flex row, anchored to the right of the
    panel header. Positioning them absolutely at fixed offsets made them overlap
    as soon as the persona names rendered wider than the guessed gap. */
-.hd-controls {
-  position: absolute; right: 22px; top: 50%; transform: translateY(-50%);
-  display: flex; align-items: center; gap: 16px;
+/* The title is centred and the controls were absolutely positioned on top
+   of it, which worked at full width and collided the moment the chat pane
+   became a 58% column. Flex row: title left, controls right, no overlap at
+   any width. */
+.chat-plate > .plate-hd {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; text-align: left; padding: 7px 16px 6px;
 }
+.hd-controls { display: flex; align-items: center; gap: 13px; flex: none; }
 .trace-switch {
   display: flex; align-items: center; gap: 7px; cursor: pointer;
   white-space: nowrap;
@@ -491,7 +667,7 @@ body {
   .trace-switch .lbl { display: none; }
 }
 @media (max-width: 680px) {
-  .hd-controls { position: static; transform: none; justify-content: center; margin-top: 8px; }
+  .hd-controls { justify-content: center; }
 }
 
 /* Scrollbar, built into the CRT rather than left as chrome default.
@@ -642,3 +818,195 @@ body {
 }
 :root[data-phosphor="off"] .phosphor-btn .dot { box-shadow: inset 0 -1px 2px rgba(0,0,0,.4); }
 @media (max-width: 980px) { .phosphor-btn .lbl { display: none; } }
+
+/* ── probe controls ──────────────────────────────────────── */
+/* Panel switches, not web buttons: the console is a bank of machined metal
+   and a flat rectangle reads as a browser artefact sitting on top of it. */
+.foot-actions { display: flex; gap: 10px; align-items: center; }
+.act {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-family: var(--display); font-size: .62rem; font-weight: 600;
+  letter-spacing: .16em; text-transform: uppercase;
+  padding: 6px 13px; border-radius: 3px; cursor: pointer;
+  color: var(--label);
+  background: linear-gradient(180deg, #3b4e58 0%, #2a3942 52%, #223038 100%);
+  border: 1px solid #16232a;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.14),
+    inset 0 -2px 4px rgba(0,0,0,.5),
+    0 2px 3px rgba(0,0,0,.45);
+}
+.act:hover:not(:disabled) { filter: brightness(1.18); }
+.act:active:not(:disabled) {
+  box-shadow: inset 0 2px 6px rgba(0,0,0,.75);
+  transform: translateY(1px);
+}
+.act:focus-visible { outline: 2px solid var(--led-amber); outline-offset: 2px; }
+.act:disabled { opacity: .42; cursor: not-allowed; }
+.act .ico { font-size: .82rem; line-height: 1; }
+.act-attack .ico { color: var(--crit); text-shadow: 0 0 7px rgba(255,80,60,.65); }
+.act-eval   .ico { color: var(--ok);   text-shadow: 0 0 7px rgba(90,220,140,.55); }
+.act-reset  .ico { color: var(--label-dim); }
+.act-reset:hover:not(:disabled) .ico { color: var(--led-amber); }
+@media (max-width: 980px) { .act .lbl { display: none; } }
+
+/* ── attack / eval toasts ────────────────────────────────── */
+/* Top right, above everything, and deliberately not a browser notification:
+   the point is that it lands on the console the participant is already
+   looking at, beside the gauges the attack is about to move. */
+:root { --toast-dim: #b8ad8e; --toast-fg: #e8e2d2; }
+
+.toasts {
+  /* Below the masthead, not over it. These used to clear themselves after a
+     few seconds, so covering the plant-status badge and the live tick was
+     momentary; now that they stay until dismissed, a single notification
+     would hide the two readings that say whether the plant is alive.
+     --mast-h is measured at runtime, because the masthead's height moves with
+     --ui-scale and with the viewport. */
+  position: fixed; top: calc(var(--mast-h, 96px) + 10px); right: 14px; z-index: 60;
+  display: flex; flex-direction: column; gap: 9px;
+  width: min(380px, calc(100vw - 28px));
+  pointer-events: none;
+}
+.toast {
+  position: relative;
+  pointer-events: auto; cursor: pointer;
+  border-radius: 4px; padding: 10px 13px 11px;
+  background:
+    var(--noise),
+    linear-gradient(180deg, #2e3f49 0%, #22333c 100%);
+  background-color: #253942;
+  border: 1px solid #16232a;
+  border-left: 4px solid var(--label-dim);
+  box-shadow: 0 6px 18px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.08);
+  animation: toast-in .24s ease-out;
+}
+.toast.wide { width: 100%; }
+.toast.leaving { animation: toast-out .3s ease-in forwards; }
+.toast.running { border-left-color: var(--led-amber); }
+.toast.ok      { border-left-color: var(--ok); }
+.toast.bad     { border-left-color: var(--crit); }
+.toast.weak    { border-left-color: var(--warn); }
+.toast.unknown { border-left-color: var(--label-dim); }
+
+/* A pinned toast stays until dismissed. Clicking one is how someone keeps a
+   result that arrived while they were looking elsewhere. */
+.toast.pinned { box-shadow: 0 6px 18px rgba(0,0,0,.55), 0 0 0 1px var(--led-amber); }
+
+/* Sits over the top-right corner of the toast, clear of the severity chip in
+   the header. Always visible rather than hover-only: a toast that cannot be
+   seen to be dismissable gets waited out instead. */
+.t-close {
+  position: absolute; top: 4px; right: 5px;
+  width: 20px; height: 20px; padding: 0; line-height: 18px;
+  font-size: 1.05rem; font-family: var(--display);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--toast-dim); background: transparent;
+  border: 1px solid transparent; border-radius: 3px;
+  cursor: pointer; opacity: .65;
+}
+.t-close:hover { opacity: 1; color: var(--toast-fg); border-color: rgba(255,255,255,.18); }
+.t-close:focus-visible { outline: 2px solid var(--led-amber); outline-offset: 1px; opacity: 1; }
+
+/* Room for the button, so a long title never runs under it. */
+.t-hd { padding-right: 20px; }
+.t-hd {
+  display: flex; align-items: center; gap: 8px;
+  font-size: .62rem; letter-spacing: .18em; text-transform: uppercase;
+  color: var(--toast-dim);
+}
+.t-mark { font-size: .95rem; line-height: 1; }
+.toast.ok      .t-mark, .toast.ok      .t-kind { color: var(--ok); }
+.toast.bad     .t-mark, .toast.bad     .t-kind { color: var(--crit); }
+.toast.running .t-mark, .toast.running .t-kind { color: var(--led-amber); }
+.toast.weak    .t-mark, .toast.weak    .t-kind { color: var(--warn); }
+.t-kind { font-weight: 600; }
+.t-sev {
+  margin-left: auto; font-size: .54rem; padding: 1px 6px; border-radius: 2px;
+  border: 1px solid currentColor; color: var(--label-dim);
+}
+.t-sev.high { color: var(--crit); }
+.t-sev.medium { color: var(--warn); }
+.t-title {
+  margin-top: 5px; font-size: .84rem; font-weight: 600; letter-spacing: .03em;
+  color: var(--toast-fg); line-height: 1.3;
+}
+.t-blurb { margin-top: 3px; font-size: .73rem; color: var(--toast-dim); line-height: 1.4; }
+.t-detail {
+  margin-top: 6px; font-family: var(--lcd); font-size: .7rem;
+  color: var(--toast-dim); line-height: 1.4;
+  border-top: 1px solid rgba(0,0,0,.4); padding-top: 5px;
+}
+.t-cleanup {
+  margin-top: 5px; font-size: .65rem; letter-spacing: .04em; line-height: 1.4;
+}
+.t-cleanup.ok { color: var(--ok); }
+.t-cleanup.bad { color: var(--warn); }
+
+/* The eval scorecard. The ratio is the whole message, so it is the only thing
+   on the card at display size. */
+.t-score {
+  margin-top: 7px; font-family: var(--lcd); font-size: 1.85rem; line-height: 1;
+  color: var(--toast-fg);
+}
+.t-score .of { color: var(--toast-dim); font-size: 1.15rem; }
+.t-score .w {
+  display: block; margin-top: 4px;
+  font-family: var(--display); font-size: .6rem;
+  letter-spacing: .18em; text-transform: uppercase; color: var(--toast-dim);
+}
+.t-list {
+  list-style: none; margin: 9px 0 0; padding: 0;
+  max-height: 220px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.t-list li {
+  display: grid; grid-template-columns: 14px 1fr; gap: 2px 7px;
+  font-size: .68rem; line-height: 1.35;
+}
+.t-list .m { grid-row: span 2; color: var(--label-dim); }
+.t-list li.ok  .m { color: var(--ok); }
+.t-list li.bad  .m { color: var(--crit); }
+.t-list li.weak .m { color: var(--warn); }
+.t-list .n { color: var(--toast-fg); }
+.t-list .d { font-family: var(--lcd); font-size: .66rem; color: var(--toast-dim); }
+.t-link {
+  display: inline-block; margin-top: 9px;
+  font-size: .64rem; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--led-amber); text-decoration: none;
+}
+.t-link:hover { text-decoration: underline; }
+
+.spin { display: inline-block; animation: spin 1.1s linear infinite; }
+
+@keyframes toast-in  { from { opacity: 0; transform: translateX(22px); } }
+@keyframes toast-out { to   { opacity: 0; transform: translateX(22px); } }
+@keyframes spin      { to   { transform: rotate(360deg); } }
+
+/* The existing reduced-motion block covers the CRT effects; these are ours. */
+@media (prefers-reduced-motion: reduce) {
+  .toast, .toast.leaving { animation: none; }
+  .spin { animation: none; }
+}
+
+/* The safety envelope is capped and scrolls internally. Breaches are a list
+   of unknown length — a cascading failure produces a dozen rows — and letting
+   it grow would push the pumps panel out of the viewport. Scrolling inside a
+   panel is fine; scrolling the console is what this layout exists to stop. */
+
+.checks { gap: 6px; }
+.check { padding: 5px 2px; }
+
+/* Narrow-but-still-two-column widths: shed the label text before the numbers.
+   The numbers are the readings; the labels are only there to name them, and
+   the panel headers already do that. */
+@media (max-width: 1420px) {
+  .pump-speed .k { display: none; }
+}
+
+/* Per-eval trace link in the scorecard. */
+.t-trace {
+  margin-left: 6px; font-size: .9em; white-space: nowrap;
+  color: var(--led-amber); text-decoration: none;
+}
+.t-trace:hover { text-decoration: underline; }

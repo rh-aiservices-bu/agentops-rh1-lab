@@ -19,51 +19,83 @@ def advance(plant, seconds: int, dt: float = 1.0) -> None:
 
 
 # --------------------------------------------------------------------------
-# The seeded fault
+# The seeded plant
 # --------------------------------------------------------------------------
 
 
-def test_seed_matches_documented_fault_condition():
-    """Pump 4 starts in the degrading-bearing state the lab guide describes."""
+def test_seed_starts_every_pump_healthy():
+    """The console must open on a plant that is working.
+
+    Pump 4 used to seed at wear 0.72 — ~8.2 mm/s, discharge down to ~3.1 bar —
+    which put the whole console into a red CRITICAL the moment it loaded. It
+    now starts sound, so a panel going red means something happened in front
+    of the participant rather than a condition that was always there.
+    """
     plant = seed()
     p4 = plant.pumps[4]
 
     assert p4.running
     assert p4.speed_pct == 100.0
-    assert p4.vibration_mm_s == pytest.approx(8.2, abs=0.3)
-    assert p4.discharge_bar == pytest.approx(3.1, abs=0.15)
-    assert p4.bearing_temp_c == pytest.approx(70.5, abs=1.5)
+    assert p4.vibration_mm_s == pytest.approx(1.9, abs=0.3)
+    assert p4.discharge_bar == pytest.approx(4.41, abs=0.15)
+    assert p4.bearing_temp_c == pytest.approx(49.1, abs=1.5)
+    # Still the oldest unit on the site; its history is why it is the
+    # interesting one to ask about, without the plant having to be broken.
+    assert p4.duty_hours == 21_680
 
 
-def test_seeded_fault_is_visible_in_the_safety_readout():
-    """A diagnosis is only possible if the fault actually reads as a breach."""
+def test_the_plant_starts_with_no_breaches():
     report = safety.evaluate(seed())
-    breached = {(c.subject, c.metric) for c in report.checks if c.status != "ok"}
+    breached = [(c.subject, c.metric, c.status) for c in report.checks if c.status != "ok"]
 
-    assert ("pump-4", "vibration") in breached
-    assert ("pump-4", "head_deficit") in breached
-    assert report.status == "critical"
+    assert breached == []
+    assert report.status == "ok"
 
 
 def test_healthy_pumps_are_within_limits():
     report = safety.evaluate(seed())
-    for pump_id in (1, 2, 3):
+    for pump_id in (1, 2, 3, 4):
         statuses = {c.status for c in report.checks if c.subject == f"pump-{pump_id}"}
         assert statuses == {"ok"}, f"pump {pump_id} should start healthy"
 
 
 # --------------------------------------------------------------------------
-# Golden workflow: derating Pump 4 to 70% must actually help
+# Derating a worn pump must actually help
 # --------------------------------------------------------------------------
+#
+# The physics the golden workflow's corrective action depends on. The fault is
+# injected rather than seeded now, but it has to behave the same way when it
+# arrives: a pump that degrades in front of a participant is only a teachable
+# moment if derating it visibly fixes the acute risk.
 
 
-def test_derating_pump_4_brings_vibration_back_inside_limits():
+def _worn(wear: float = 0.72):
+    """A plant whose pump 4 has degraded to the state the lab used to seed."""
+    plant = seed()
+    plant.pumps[4].wear = wear
+    advance(plant, 5)
+    return plant
+
+
+def test_a_worn_pump_reads_as_a_breach():
+    """A diagnosis is only possible if the fault actually reads as one."""
+    plant = _worn()
+    report = safety.evaluate(plant)
+    breached = {(c.subject, c.metric) for c in report.checks if c.status != "ok"}
+
+    assert plant.pumps[4].vibration_mm_s == pytest.approx(8.2, abs=0.3)
+    assert ("pump-4", "vibration") in breached
+    assert ("pump-4", "head_deficit") in breached
+    assert report.status == "critical"
+
+
+def test_derating_a_worn_pump_brings_vibration_back_inside_limits():
     """The final verification step of the golden workflow.
 
     If this fails, the agent's recommended corrective action stops being
     correct and the whole lab narrative breaks.
     """
-    plant = seed()
+    plant = _worn()
     before = plant.pumps[4].vibration_mm_s
 
     plant.pumps[4].speed_setpoint_pct = 70.0
@@ -74,7 +106,7 @@ def test_derating_pump_4_brings_vibration_back_inside_limits():
     assert after == pytest.approx(5.2, abs=0.3)
 
 
-def test_derating_pump_4_clears_the_acute_risk_without_hiding_the_fault():
+def test_derating_clears_the_acute_risk_without_hiding_the_fault():
     """The state the golden workflow should leave the plant in.
 
     Not "all green" — the bearing is still worn and the work order still
@@ -83,7 +115,7 @@ def test_derating_pump_4_clears_the_acute_risk_without_hiding_the_fault():
     what makes this possible; an absolute pressure threshold would trip on the
     derate itself and make the correct action look like a mistake.
     """
-    plant = seed()
+    plant = _worn()
     assert safety.evaluate(plant).status == "critical"
 
     plant.pumps[4].speed_setpoint_pct = 70.0
@@ -256,4 +288,4 @@ def test_reset_restores_the_seeded_state():
     fresh = seed()
     assert fresh.reservoir.level_pct == pytest.approx(62.4, abs=0.01)
     assert not fresh.valves["emergency_bypass"].open
-    assert fresh.pumps[4].vibration_mm_s == pytest.approx(8.2, abs=0.3)
+    assert fresh.pumps[4].vibration_mm_s == pytest.approx(1.9, abs=0.3)

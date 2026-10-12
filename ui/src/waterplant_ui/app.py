@@ -13,6 +13,8 @@ consequence of a tool call independently of what the agent claims happened.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import ssl
 import uuid
@@ -20,12 +22,19 @@ from pathlib import Path
 from typing import Any, Literal
 
 import httpx
-from fastapi import FastAPI, Request
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import harness
+from .probes import engine as probe_engine
+from .probes import loader as probe_loader
+from .probes import events as probe_events
+from .probes import mlflow_run, scheduler
+
+log = logging.getLogger(__name__)
 
 PLANT_API_URL = os.environ.get("PLANT_API_URL", "http://plant-api:8080")
 # Empty until the agent is deployed — the chat pane degrades to a clear
@@ -41,10 +50,77 @@ AGENT_TLS_CA = os.environ.get("AGENT_TLS_CA", "")
 AGENT_TLS_CERT = os.environ.get("AGENT_TLS_CERT", "")
 AGENT_TLS_KEY = os.environ.get("AGENT_TLS_KEY", "")
 
+#: The attack/eval engine. Off by one env var, because an instructor
+#: walking through module 1 does not want an attack landing mid-sentence.
+PROBES_ENABLED = os.environ.get("PROBES_ENABLED", "1").strip().lower() not in (
+    "0", "false", "no", ""
+)
+#: Whether attacks fire on their own. Separate from PROBES_ENABLED, which
+#: turns the whole engine off including the buttons: this leaves the console
+#: fully usable and only stops the clock. Off while the lab is being built,
+#: so an attack never lands in the middle of someone demonstrating something
+#: else; the scheduler itself is untouched and comes back with one env var.
+ATTACK_SCHEDULER_ENABLED = os.environ.get(
+    "ATTACK_SCHEDULER_ENABLED", "1"
+).strip().lower() not in ("0", "false", "no")
+#: The randomised attack window. Random inside it rather than a fixed tick:
+#: a predictable rhythm gets learned and watched for.
+ATTACK_INTERVAL_MIN_S = float(os.environ.get("ATTACK_INTERVAL_MIN_S", "300"))
+ATTACK_INTERVAL_MAX_S = float(os.environ.get("ATTACK_INTERVAL_MAX_S", "600"))
+#: Per-probe budget. Generous: a golden-workflow turn is a multi-step tool
+#: chain through a shared model endpoint that answers 429 under load.
+PROBE_TIMEOUT_S = float(os.environ.get("PROBE_TIMEOUT_S", "180"))
+
 STATIC = Path(__file__).parent / "static"
 
-app = FastAPI(title="Water Plant UI", version="0.1.0")
 _client: httpx.AsyncClient | None = None
+_engine: probe_engine.Engine | None = None
+_scheduler: scheduler.Scheduler | None = None
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Build the probe engine and start its timer.
+
+    Both are optional: with PROBES_ENABLED off, or no agent to probe, the
+    console serves the dashboard and chat exactly as it did before and the
+    attack endpoints answer 503 with a reason.
+    """
+    global _engine, _scheduler
+    if PROBES_ENABLED and AGENT_URL:
+        _engine = probe_engine.Engine(
+            client=client(),
+            agent_url=AGENT_URL,
+            plant_api_url=PLANT_API_URL,
+            timeout_s=PROBE_TIMEOUT_S,
+        )
+        # Recover before anything else runs. A plant left in emergency
+        # shutdown by an earlier session has its intake controller stopped,
+        # so the reservoir drains to zero and every reading on the console —
+        # and every probe result — is measured against a dead plant.
+        try:
+            healthy, why = await _engine.ensure_plant_healthy()
+            log.info("plant health at startup: %s", why)
+            if not healthy:
+                log.warning("console starting against an unhealthy plant: %s", why)
+        except Exception:  # noqa: BLE001 - never block startup on this
+            log.exception("plant health check failed at startup")
+
+        if ATTACK_SCHEDULER_ENABLED:
+            _scheduler = scheduler.Scheduler(
+                _engine, min_s=ATTACK_INTERVAL_MIN_S, max_s=ATTACK_INTERVAL_MAX_S
+            )
+            _scheduler.start()
+        else:
+            log.info("attack scheduler disabled; attacks run from the button only")
+    try:
+        yield
+    finally:
+        if _scheduler is not None:
+            await _scheduler.stop()
+
+
+app = FastAPI(title="Water Plant UI", version="0.2.0", lifespan=lifespan)
 
 
 def client() -> httpx.AsyncClient:
@@ -84,15 +160,177 @@ async def config() -> dict[str, Any]:
 
 
 @app.get("/api/state")
-async def state() -> JSONResponse:
-    """Plant state and safety readout in one call, for the dashboard poll."""
+async def state(events_since: int = Query(-1, alias="eventsSince")) -> JSONResponse:
+    """Plant state, safety readout and any new probe events, in one call.
+
+    The events ride along on the dashboard's existing 1 Hz poll rather than
+    getting a channel of their own. That is the whole notification mechanism:
+    no websocket, no SSE, no push infrastructure. The client sends the highest
+    sequence number it has seen and gets everything after it, so a reconnecting
+    browser catches up by construction and a dropped poll costs nothing.
+
+    `eventsSince=-1` (the default, and what a freshly loaded page sends) means
+    "I am new here": it returns the current cursor and no backlog, so a reload
+    does not replay an hour of old attacks as live toasts.
+    """
     try:
         plant, safety = await _gather("/state", "/safety")
     except httpx.HTTPError as exc:
         return JSONResponse(
             {"error": f"plant-api unreachable: {exc}"}, status_code=503
         )
-    return JSONResponse({"plant": plant, "safety": safety})
+
+    if events_since < 0:
+        new_events: list[dict[str, Any]] = []
+        cursor = probe_events.latest_seq()
+    else:
+        new_events = probe_events.since(events_since)
+        cursor = new_events[-1]["seq"] if new_events else events_since
+
+    return JSONResponse(
+        {
+            "plant": plant,
+            "safety": safety,
+            "events": new_events,
+            "eventCursor": cursor,
+            "probesBusy": _engine.busy() if _engine else False,
+        }
+    )
+
+
+def _probes_unavailable() -> JSONResponse:
+    """Why the buttons cannot do anything, in terms the console can show."""
+    if not PROBES_ENABLED:
+        detail = "The attack and evaluation engine is disabled (PROBES_ENABLED=0)."
+    elif not AGENT_URL:
+        detail = (
+            "There is no agent to probe yet. Attacks and evals run against the "
+            "agent through the same chat endpoint this console uses."
+        )
+    else:
+        detail = "The attack and evaluation engine did not start."
+    return JSONResponse({"error": "probes_unavailable", "detail": detail}, status_code=503)
+
+
+@app.get("/api/probes")
+async def probes() -> JSONResponse:
+    """The catalogue, including the cases that are defined but not yet armed.
+
+    A disabled case is shown with the reason it is disabled rather than hidden.
+    A participant who cannot see that three of the seven attacks are not
+    running would reasonably conclude they are defended against them.
+    """
+    if _engine is None:
+        # Still report a definitions fault. The engine is not built when there
+        # is no agent to probe, but "no definitions are mounted" is a separate
+        # deployment problem and stays worth saying — otherwise fixing the
+        # agent just reveals it a second time.
+        return JSONResponse(
+            {
+                "attacks": [],
+                "evals": [],
+                "busy": False,
+                "available": False,
+                "problem": probe_loader.load_problem(),
+            }
+        )
+    return JSONResponse(
+        {
+            **_engine.catalogue(),
+            "available": True,
+            "scheduled": ATTACK_SCHEDULER_ENABLED,
+        }
+    )
+
+
+class AttackRequest(BaseModel):
+    #: Omitted or null picks a random armed attack — what the button sends.
+    id: str | None = None
+
+
+@app.post("/api/attacks/run")
+async def run_attack(req: AttackRequest) -> JSONResponse:
+    """Fire one attack now, in the background.
+
+    Returns as soon as the attack is chosen, not when it finishes: a probe is a
+    multi-turn conversation with a model and can take minutes. The console
+    learns what happened from the event stream, exactly as it does for a
+    scheduled attack — one code path, so the button cannot drift from the timer.
+    """
+    if _engine is None:
+        return _probes_unavailable()
+    if _engine.busy():
+        return JSONResponse(
+            {"error": "busy", "detail": "A probe is already running."}, status_code=409
+        )
+
+    if req.id:
+        case = next((c for c in _engine.attacks() if c.id == req.id), None)
+        if case is None:
+            return JSONResponse(
+                {"error": "unknown_attack", "detail": f"No armed attack {req.id!r}."},
+                status_code=404,
+            )
+    else:
+        case = _engine.pick_attack()
+        if case is None:
+            return JSONResponse(
+                {"error": "none_armed", "detail": "No attacks are currently armed."},
+                status_code=503,
+            )
+
+    asyncio.create_task(_engine.run_attack(case))
+    return JSONResponse({"started": True, "id": case.id, "title": case.title})
+
+
+@app.post("/api/plant/reset")
+async def reset_plant() -> JSONResponse:
+    """Restore the seeded plant, on the operator's explicit say-so.
+
+    Deliberately a button and not something that happens quietly. POST /reset
+    reseeds the maintenance store as well as the plant, so every work order
+    raised since the last reset is gone and the work-order sequence restarts —
+    that is why cleanup only reaches for it when the alternative is a plant
+    that stays dark, and why the console asks before calling this.
+    """
+    try:
+        response = await client().post(f"{PLANT_API_URL}/reset", timeout=30.0)
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        return JSONResponse(
+            {"error": "reset_failed", "detail": f"plant-api: {exc}"}, status_code=502
+        )
+
+    probe_events.emit(
+        kind="plant", phase="resolved", id="plant-reset",
+        title="Plant reset", outcome="reset",
+        detail="the plant is back at its seeded starting state; work orders and "
+               "maintenance records raised since the last reset are gone",
+    )
+    return JSONResponse({"reset": True})
+
+
+@app.post("/api/evals/run")
+async def run_evals() -> JSONResponse:
+    """Run the whole eval suite and return the scorecard.
+
+    Synchronous, unlike the attack endpoint: the participant pressed this and
+    is waiting for a number. Per-eval progress still goes out as events, so the
+    console can tick through the suite rather than showing a dead spinner.
+    """
+    if _engine is None:
+        return _probes_unavailable()
+    if _engine.busy():
+        return JSONResponse(
+            {"error": "busy", "detail": "A probe is already running."}, status_code=409
+        )
+
+    summary = await _engine.run_all_evals()
+    # Best-effort: a sweep that ran is a sweep that counts, whether or not
+    # MLflow was reachable to record it.
+    summary["mlflowRunUrl"] = await mlflow_run.log_eval_sweep(client(), summary)
+    probe_events.emit(**summary)
+    return JSONResponse(summary)
 
 
 async def _gather(*paths: str) -> list[Any]:
