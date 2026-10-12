@@ -187,6 +187,43 @@ async def find_traces_by_session(
     return found
 
 
+async def _link_traces(
+    client: httpx.AsyncClient, run_id: str, trace_ids: list[str]
+) -> bool:
+    """Attach the sweep's traces to its run, so the run's Evaluations tab
+    shows them.
+
+    `POST /api/2.0/mlflow/traces/link-to-run`, which sets `mlflow.sourceRun`
+    on each trace server-side. Two things about it are easy to get wrong, and
+    cost this a couple of rounds:
+
+    * It lives under **2.0**, even though trace *search* on this server is
+      3.0-only. Probing only `/api/3.0/...` returns ENDPOINT_NOT_FOUND, which
+      reads as "this build cannot do it".
+    * The result is not visible in a plain traces/search response — the
+      metadata it sets is not echoed there. Confirm with a filtered search:
+      ``filter: metadata.`mlflow.sourceRun` = '<run id>'``.
+
+    Capped at 100 trace ids per request by the API; a sweep is far smaller,
+    but the slice keeps that from becoming a surprise later.
+    """
+    if not trace_ids:
+        return True
+    try:
+        response = await client.post(
+            _api("/traces/link-to-run"),
+            json={"run_id": run_id, "trace_ids": trace_ids[:100]},
+            headers=_headers(),
+            timeout=25.0,
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        # The sweep is recorded either way; this only costs the association.
+        log.warning("linking traces to run %s failed: %s", run_id, exc)
+        return False
+    return True
+
+
 async def _await_traces(
     client: httpx.AsyncClient, experiment_id: str, sessions: set[str]
 ) -> dict[str, str]:
@@ -205,8 +242,9 @@ async def _await_traces(
         found = await find_traces_by_session(client, experiment_id, sessions)
         if len(found) == len(sessions) or time.monotonic() >= deadline:
             if len(found) < len(sessions):
-                log.info(
-                    "eval sweep: %d of %d traces resolved before the deadline",
+                log.warning(
+                    "eval sweep: only %d of %d traces resolved before the "
+                    "deadline; those evals will have no trace link",
                     len(found), len(sessions),
                 )
             return found
@@ -236,6 +274,19 @@ async def _write(client: httpx.AsyncClient, summary: dict[str, Any]) -> str | No
     if experiment_id is None:
         return None
 
+    # Resolve each eval's trace before the run is written, so the ids are
+    # available both for the run's tags and for the links the console renders.
+    sessions = {r["session_id"] for r in summary["results"] if r.get("session_id")}
+    by_session = await _await_traces(client, experiment_id, sessions)
+    for r in summary["results"]:
+        trace_id = by_session.get(r.get("session_id") or "")
+        if trace_id:
+            r["trace_id"] = trace_id
+            r["traceUrl"] = (
+                f"{MLFLOW_URL or MLFLOW_API_URL}/#/experiments/{experiment_id}"
+                f"/traces?workspace={NAMESPACE}&selectedEvaluationId={trace_id}"
+            )
+
     now_ms = int(time.time() * 1000)
     try:
         created = await client.post(
@@ -254,6 +305,12 @@ async def _write(client: httpx.AsyncClient, summary: dict[str, Any]) -> str | No
         )
         created.raise_for_status()
         run_id = created.json()["run"]["info"]["run_id"]
+
+        await _link_traces(
+            client,
+            run_id,
+            [r["trace_id"] for r in summary["results"] if r.get("trace_id")],
+        )
 
         metrics = [
             {
@@ -278,20 +335,9 @@ async def _write(client: httpx.AsyncClient, summary: dict[str, Any]) -> str | No
             for r in summary["results"]
             if r["outcome"] == "inconclusive"
         ]
-        # Each eval's trace, recorded on the run as a tag.
-        #
-        # Not the same thing as MLflow's own run-to-trace association, which
-        # is what fills a run's Evaluations tab. That needs `mlflow.sourceRun`
-        # set in the trace's metadata, and metadata is fixed when the trace is
-        # written: hermes_otel sends it from a config rendered at pod start,
-        # long before this run exists. Setting it afterwards needs
-        # UpdateTraceInfo, which this MLflow answers with a 500 —
-        # `TraceStatus.UNSPECIFIED is not a valid TraceStatus` — for every
-        # body shape, a v2/v3 mismatch in the server rather than the request.
-        #
-        # So the link runs the other way: the run names its traces, and the
-        # console links straight to them. The Evaluations tab stays empty
-        # until the server can take the association.
+        # Each eval's trace, also recorded on the run as a tag. The real
+        # association is made by _link_traces below; these are here because a
+        # tag is readable at a glance when browsing the run.
         tags += [
             {"key": f"trace.{r['id']}", "value": r["trace_id"]}
             for r in summary["results"]

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import json
+
 import httpx
 import pytest
 
@@ -876,6 +878,64 @@ async def test_a_releasable_shutdown_is_cleared_and_the_probe_proceeds(monkeypat
 
     assert result.outcome == "blocked"
     assert live["shutdown_active"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_actually_resolves_and_records_its_traces(monkeypatch):
+    """End to end through _write, because the parts can all be right and still
+    not be connected.
+
+    _await_traces existed, find_traces_by_session worked when called by hand,
+    and the tag comprehension was correct — but nothing called the lookup, so
+    trace_id was never set and the comprehension quietly produced no tags.
+    Testing the helpers in isolation could not see that.
+    """
+    from waterplant_ui.probes import mlflow_run
+
+    posted = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/experiments/get-by-name"):
+            return httpx.Response(200, json={"experiment": {"experiment_id": "7"}})
+        body = json.loads(request.read() or b"{}")
+        if path.endswith("/traces/search"):
+            return httpx.Response(200, json={"traces": [
+                {"trace_id": "tr-abc", "trace_metadata": {"mlflow.trace.session": "sess-1"}},
+            ]})
+        if path.endswith("/runs/create"):
+            return httpx.Response(200, json={"run": {"info": {"run_id": "run-9"}}})
+        posted.append((path, body))
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(mlflow_run, "MLFLOW_API_URL", "http://mlflow")
+    monkeypatch.setattr(mlflow_run, "EXPERIMENT", "user-x")
+    monkeypatch.setattr(mlflow_run, "MLFLOW_URL", "https://ui/mlflow")
+    monkeypatch.setattr(mlflow_run, "NAMESPACE", "user-x-agentops")
+
+    summary = {"passed": 1, "total": 1, "results": [
+        {"id": "telemetry-lookup", "title": "T", "outcome": "passed",
+         "detail": "d", "session_id": "sess-1"},
+    ]}
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    url = await mlflow_run._write(client, summary)
+
+    assert url and "run-9" in url
+    # The result carries its trace and a link the console can render...
+    assert summary["results"][0]["trace_id"] == "tr-abc"
+    assert "selectedEvaluationId=tr-abc" in summary["results"][0]["traceUrl"]
+    # ...and the run is tagged with it.
+    batch = [b for p_, b in posted if p_.endswith("/runs/log-batch")][0]
+    assert {"key": "trace.telemetry-lookup", "value": "tr-abc"} in batch["tags"]
+
+    # ...and the trace is actually linked to the run, which is what fills the
+    # run's Evaluations tab. Note the endpoint is under 2.0 even though trace
+    # search is 3.0-only on this server.
+    linked = [(p_, b) for p_, b in posted if p_.endswith("/traces/link-to-run")]
+    assert linked, "the sweep must link its traces to the run"
+    path, body = linked[0]
+    assert "/api/2.0/mlflow/traces/link-to-run" in path
+    assert body == {"run_id": "run-9", "trace_ids": ["tr-abc"]}
 
 
 @pytest.mark.asyncio
