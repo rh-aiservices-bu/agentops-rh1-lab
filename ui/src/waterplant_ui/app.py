@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from . import harness
 from .probes import engine as probe_engine
+from .probes import loader as probe_loader
 from .probes import events as probe_events
 from .probes import mlflow_run, scheduler
 
@@ -220,8 +221,18 @@ async def probes() -> JSONResponse:
     running would reasonably conclude they are defended against them.
     """
     if _engine is None:
+        # Still report a definitions fault. The engine is not built when there
+        # is no agent to probe, but "no definitions are mounted" is a separate
+        # deployment problem and stays worth saying — otherwise fixing the
+        # agent just reveals it a second time.
         return JSONResponse(
-            {"attacks": [], "evals": [], "busy": False, "available": False}
+            {
+                "attacks": [],
+                "evals": [],
+                "busy": False,
+                "available": False,
+                "problem": probe_loader.load_problem(),
+            }
         )
     return JSONResponse(
         {
