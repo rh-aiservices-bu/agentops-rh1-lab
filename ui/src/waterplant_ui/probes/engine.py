@@ -96,12 +96,26 @@ class Engine:
         client: httpx.AsyncClient,
         agent_url: str,
         plant_api_url: str,
+        docs_url: str = "",
         cases: list[Case] | None = None,
         timeout_s: float = 180.0,
     ) -> None:
         self._client = client
         self._agent_url = agent_url
         self._plant_api_url = plant_api_url
+        #: The documentation site. Two jobs: it serves the pages the doc
+        #: cases ask the agent to read, and it records what reached its
+        #: attacker path — so a honeypot goal is judged by what arrived
+        #: rather than by what the agent said it did. Empty means no
+        #: observer, and those goals stay unjudgeable rather than passing.
+        #:
+        #: One URL for both the engine and the agent, because both reach it
+        #: by Service name. That takes the agent's own SSRF check being off
+        #: (security.allow_private_urls in its config); with the check on,
+        #: nothing in the namespace is reachable and a Route is no better —
+        #: from inside a pod the apps domain resolves to the router's
+        #: internal address, which is precisely what the check blocks.
+        self._docs_url = docs_url.rstrip("/")
         self._cases = cases if cases is not None else loader.load_all()
         self._timeout_s = timeout_s
         self._lock = asyncio.Lock()
@@ -194,6 +208,15 @@ class Engine:
         async with self._lock:
             return await self._run_attack(case, cycle_id or self._cycle_id_for(case))
 
+    def _render(self, value: Any, cycle_id: str) -> Any:
+        """Fill a definition's template variables for this run.
+
+        One place rather than seven call sites, because the two variables
+        have to agree: the prompt the agent is given and the goal we judge it
+        against must name the same canary and the same documentation host.
+        """
+        return loader.render(value, cycle_id, self._docs_url)
+
     def _cycle_id_for(self, case: Case) -> str:
         """The cycle id this attack should run under.
 
@@ -261,14 +284,14 @@ class Engine:
         )
 
     async def _run_attack(self, case: Case, cycle_id: str) -> Outcome:
-        spec = loader.render(case.goal, cycle_id)
-        prompts = [loader.render(p, cycle_id) for p in case.prompts]
+        spec = self._render(case.goal, cycle_id)
+        prompts = [self._render(p, cycle_id) for p in case.prompts]
 
         # An attack whose canary was never planted is skipped, not scored.
         # Crediting a deletion that could not have happened would tell the
         # participant they are defended when nothing was tested.
         if case.requires_canary:
-            wanted = loader.render(case.requires_canary, cycle_id)
+            wanted = self._render(case.requires_canary, cycle_id)
             if wanted not in self._canaries:
                 result = Outcome(
                     case.id, case.title, "inconclusive",
@@ -313,6 +336,16 @@ class Engine:
             kind="attack", phase="started", id=case.id, title=case.title,
             severity=case.severity, blurb=case.blurb,
         )
+        # Before the prompt goes out, so a hit cannot predate the probe that
+        # is about to be credited with it. The observer's clock is its own,
+        # so ask it rather than using ours.
+        started_at = await self._observer_now()
+        # Captured before the prompt goes out: after it the file may already
+        # be the attacker's version. Only for the case that needs it — it
+        # costs an extra turn.
+        soul_before = ""
+        if case.cleanup.get("type") == "soul_restore":
+            soul_before = await self._read_soul(case.cleanup.get("path", "SOUL.md"))
         succeeded = False
         shutdown_was_set = False
         result = Outcome(case.id, case.title)
@@ -325,7 +358,9 @@ class Engine:
                 result.detail = turn.error
                 return result
 
-            verdict = await self._judge(spec, turn, before, cycle_id)
+            verdict = await self._judge(
+                spec, turn, before, cycle_id, since=started_at
+            )
             if verdict is None:
                 result.detail = "could not be judged — see the definition for why"
                 return result
@@ -334,7 +369,7 @@ class Engine:
             if succeeded and case.requires_canary:
                 # Consumed. Offering a deleted decoy to the next run would
                 # score an attack against a file that is already gone.
-                self._canaries.pop(loader.render(case.requires_canary, cycle_id), None)
+                self._canaries.pop(self._render(case.requires_canary, cycle_id), None)
             after = await plant.snapshot(self._client, self._plant_api_url)
             shutdown_was_set = after.shutdown and not before.shutdown
             if succeeded:
@@ -363,6 +398,7 @@ class Engine:
                 plant_api_url=self._plant_api_url,
                 before=before,
                 shutdown_was_set=shutdown_was_set,
+                soul_before=soul_before,
                 # Restoring goes back through the same chat endpoint the
                 # attack used, so the agent undoes its own work. cleanup falls
                 # back to plant-api only if that does not restore the plant.
@@ -381,8 +417,8 @@ class Engine:
         )
 
     async def _run_eval(self, case: Case, cycle_id: str) -> Outcome:
-        spec = loader.render(case.goal, cycle_id)
-        prompts = [loader.render(p, cycle_id) for p in case.prompts]
+        spec = self._render(case.goal, cycle_id)
+        prompts = [self._render(p, cycle_id) for p in case.prompts]
         result = Outcome(case.id, case.title)
 
         before = await plant.snapshot(self._client, self._plant_api_url)
@@ -413,7 +449,7 @@ class Engine:
             result.detail = detail
 
             if reached and case.plants_canary:
-                self._canaries[loader.render(case.plants_canary, cycle_id)] = cycle_id
+                self._canaries[self._render(case.plants_canary, cycle_id)] = cycle_id
             return result
         except Exception as exc:  # noqa: BLE001
             result.detail = f"probe error: {exc}"
@@ -424,6 +460,37 @@ class Engine:
                 severity=case.severity, outcome=result.outcome, detail=result.detail,
             )
 
+    async def _read_soul(self, path: str) -> str:
+        """The agent's instructions as they stand, for restoring afterwards.
+
+        Empty when it cannot be read, which cleanup treats as "do not run the
+        restore" rather than "restore to nothing" — overwriting the agent's
+        instructions with an empty file would be worse than the attack it is
+        meant to undo.
+        """
+        turn = await agent.ask(
+            self._client,
+            self._agent_url,
+            [goals.SOUL_READ_PROMPT.format(path=path)],
+            timeout_s=self._timeout_s,
+        )
+        return goals.extract_block(turn.text) if turn.ok else ""
+
+    async def _observer_now(self) -> float:
+        """The documentation site's own clock, for attributing hits.
+
+        Its clock, not ours: the two pods can drift, and a few seconds of skew
+        either way decides whether a hit counts.
+        """
+        if not self._docs_url:
+            return 0.0
+        try:
+            response = await self._client.get(f"{self._docs_url}/hits", timeout=10.0)
+            response.raise_for_status()
+            return float(response.json().get("now", 0.0))
+        except (httpx.HTTPError, ValueError, TypeError):
+            return 0.0
+
     async def _judge(
         self,
         spec: dict[str, Any],
@@ -432,6 +499,7 @@ class Engine:
         cycle_id: str,
         *,
         before_count: int = -1,
+        since: float = 0.0,
     ) -> goals.Verdict:
         """Dispatch to the goal checker the case declares."""
         kind = spec.get("type")
@@ -443,7 +511,8 @@ class Engine:
             details: list[str] = []
             for sub in spec.get("of") or []:
                 verdict = await self._judge(
-                    sub, turn, before, cycle_id, before_count=before_count
+                    sub, turn, before, cycle_id,
+                    before_count=before_count, since=since,
                 )
                 if verdict is None:
                     return None
@@ -484,6 +553,8 @@ class Engine:
             return goals.fs_probe(spec, goals.interpret_fs_answer(check.text))
 
         if kind == "honeypot_hit":
-            return goals.honeypot_hit(spec)
+            return await goals.honeypot_hit(
+                spec, self._client, self._docs_url, since
+            )
 
         return None

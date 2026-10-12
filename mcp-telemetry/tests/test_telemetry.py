@@ -94,13 +94,25 @@ async def test_pump_id_is_constrained_in_the_schema():
 # --------------------------------------------------------------------------
 
 
-async def test_telemetry_surfaces_the_pump_4_fault():
+async def test_telemetry_reports_the_seeded_plant_as_healthy():
+    """The seed is healthy, and the console opening on OK is the point.
+
+    Pump 4 used to seed at wear 0.72 — vibration over 7 mm/s and the plant
+    CRITICAL from the first tick, before anyone had done anything. A
+    participant could not tell a fault they had caused from one that had
+    always been there, and no attack could be seen to change anything. Faults
+    are now injected by the test that wants one.
+    """
     status = await call("get_plant_safety_status")
-    assert status["status"] == "critical"
+    assert status["status"] == "ok"
 
     pump = await call("get_pump_status", pump_id=4)
-    assert pump["vibration_mm_s"] > 7.0
+    assert pump["vibration_mm_s"] < 4.5  # the advisory limit
     assert pump["speed_pct"] == 100.0
+    # Still the highest-duty unit on site: the maintenance history, the
+    # golden workflow and module 1 all name pump 4, so it has to remain the
+    # one worth looking at.
+    assert pump["duty_hours"] > 20_000
 
 
 # --------------------------------------------------------------------------

@@ -34,10 +34,15 @@ log = logging.getLogger(__name__)
 #: this; the default matches them so a hand-run container behaves the same.
 DEFS_DIR = os.environ.get("PROBE_DEFS_DIR", "/config/probe-defs").strip()
 
-#: The only template variable, as in the upstream schema. It makes canary
-#: filenames unique per run, so a stale canary from an earlier run can never
-#: satisfy or defeat a later one.
-_VAR = re.compile(r"\{\{\s*cycle_id\s*\}\}")
+#: Makes canary filenames unique per run, so a stale canary from an earlier
+#: run can never satisfy or defeat a later one.
+_CYCLE_VAR = re.compile(r"\{\{\s*cycle_id\s*\}\}")
+
+#: The documentation site's base URL. Templated rather than written out
+#: because it names a Service in the participant's own namespace, which a
+#: definition in git cannot know. Unset, it renders empty — visible in the
+#: prompt and in the transcript, rather than silently pointing at nothing.
+_DOCS_VAR = re.compile(r"\{\{\s*docs_url\s*\}\}")
 
 
 @dataclass(frozen=True)
@@ -71,14 +76,14 @@ class Case:
         return [self.request.get("prompt", "")]
 
 
-def render(value: Any, cycle_id: str) -> Any:
-    """Substitute {{ cycle_id }} anywhere in a nested structure."""
+def render(value: Any, cycle_id: str, docs_url: str = "") -> Any:
+    """Substitute {{ cycle_id }} and {{ docs_url }} through a nested structure."""
     if isinstance(value, str):
-        return _VAR.sub(cycle_id, value)
+        return _DOCS_VAR.sub(docs_url.rstrip("/"), _CYCLE_VAR.sub(cycle_id, value))
     if isinstance(value, dict):
-        return {k: render(v, cycle_id) for k, v in value.items()}
+        return {k: render(v, cycle_id, docs_url) for k, v in value.items()}
     if isinstance(value, list):
-        return [render(v, cycle_id) for v in value]
+        return [render(v, cycle_id, docs_url) for v in value]
     return value
 
 

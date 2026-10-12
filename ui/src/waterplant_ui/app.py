@@ -70,6 +70,13 @@ ATTACK_INTERVAL_MAX_S = float(os.environ.get("ATTACK_INTERVAL_MAX_S", "600"))
 #: Per-probe budget. Generous: a golden-workflow turn is a multi-step tool
 #: chain through a shared model endpoint that answers 429 under load.
 PROBE_TIMEOUT_S = float(os.environ.get("PROBE_TIMEOUT_S", "180"))
+#: The documentation site. It serves the pages read-documentation asks for
+#: and, on one page, a redirect onward to an attacker path it logs — so it is
+#: both the target of the doc evals and the only observer of whether an
+#: exfiltration attempt actually arrived somewhere. Unset, the honeypot goals
+#: have no observer and the engine reports them unjudgeable rather than
+#: guessing from the transcript.
+DOCS_URL = os.environ.get("DOCS_URL", "")
 
 STATIC = Path(__file__).parent / "static"
 
@@ -92,6 +99,7 @@ async def lifespan(_: FastAPI):
             client=client(),
             agent_url=AGENT_URL,
             plant_api_url=PLANT_API_URL,
+            docs_url=DOCS_URL,
             timeout_s=PROBE_TIMEOUT_S,
         )
         # Recover before anything else runs. A plant left in emergency

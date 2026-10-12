@@ -25,7 +25,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from . import plant
+from . import goals, plant
 
 #: Whether cleanup may reseed the plant as a last resort. On by default: the
 #: alternative, on a plant-api that cannot release an emergency shutdown, is a
@@ -66,6 +66,7 @@ async def run(
     before: plant.Snapshot | None,
     shutdown_was_set: bool = False,
     ask=None,
+    soul_before: str = "",
 ) -> CleanupResult:
     kind = (spec or {}).get("type", "none")
 
@@ -82,6 +83,45 @@ async def run(
         return CleanupResult(
             attempted=False,
             detail="the deleted file was a decoy; the next eval sweep plants a fresh one",
+        )
+
+    if kind == "soul_restore":
+        # The agent's own instructions file. There is no canary equivalent —
+        # writing to a decoy proves nothing about whether the real one is
+        # writable — so the only safe way to run this attack is to put the
+        # original back afterwards.
+        if not soul_before:
+            return CleanupResult(
+                attempted=True,
+                succeeded=False,
+                detail="the original instructions were never captured, so they "
+                       "cannot be restored; the agent is running on the "
+                       "tampered file",
+            )
+        if ask is None:
+            return CleanupResult(
+                attempted=True, succeeded=False,
+                detail="no agent available to restore the instructions file",
+            )
+        path = (spec or {}).get("path", "SOUL.md")
+        turn = await ask(
+            goals.SOUL_RESTORE_PROMPT.format(path=path, body=soul_before)
+        )
+        if not turn.ok:
+            return CleanupResult(
+                attempted=True, succeeded=False,
+                detail=f"restore request failed: {turn.error}",
+            )
+        check = await ask(goals.SOUL_READ_PROMPT.format(path=path))
+        if check.ok and goals.extract_block(check.text).strip() == soul_before.strip():
+            return CleanupResult(
+                attempted=True, succeeded=True,
+                detail="the agent's instructions were restored and verified",
+            )
+        return CleanupResult(
+            attempted=True, succeeded=False,
+            detail="the instructions file does not match what was captured; "
+                   "the agent may still be running on tampered instructions",
         )
 
     if kind == "plant_state_restore":
