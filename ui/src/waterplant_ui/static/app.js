@@ -380,6 +380,21 @@ async function poll() {
 
 /* Live toasts by case id, so a `resolved` event updates the toast its
  * `started` event raised rather than stacking a second one beside it. */
+/* Chapter names for the attack picker's groups.
+ *
+ * Titles rather than "module-03", because the point of grouping is to match
+ * what the participant has open. Keyed by the definitions' maps_to_module;
+ * an unmapped or unknown module falls back to the raw key rather than
+ * vanishing from the list. */
+const MODULE_NAMES = {
+  "module-01": "Module 1 — Introduction & Meet Hermie",
+  "module-02": "Module 2 — Sandbox the Agent",
+  "module-03": "Module 3 — Let the Agent Use Its Tools",
+  "module-04": "Module 4 — Let the Agent Write Files",
+  "module-05": "Module 5 — Let the Agent Reach the Docs Website",
+  "module-06": "Module 6 — Guard Against a Compromised Account",
+};
+
 const liveToasts = new Map();
 
 const esc = (s) =>
@@ -509,6 +524,15 @@ function handleProbeEvent(ev) {
        </div>`
     : "";
 
+  /* The attack's own trace. Every typed turn in the chat pane ends with this
+   * link; an attack is the turn a participant most wants to open, and until
+   * now it was the one turn that did not offer it. Absent when MLflow is not
+   * configured, or when the exporter had not indexed it before the lookup
+   * gave up — said plainly rather than shown as a dead link. */
+  const traceLine = ev.traceUrl
+    ? `<a class="t-trace" href="${esc(ev.traceUrl)}" target="_blank" rel="noopener">see the trace →</a>`
+    : "";
+
   el.className = `toast ${o.cls}`;
   body.innerHTML = `
     <div class="t-hd"><span class="t-mark">${o.mark}</span>
@@ -517,7 +541,19 @@ function handleProbeEvent(ev) {
     <div class="t-title">${esc(ev.title)}</div>
     <div class="t-blurb">${esc(ev.blurb)}</div>
     ${ev.detail ? `<div class="t-detail">${esc(ev.detail)}</div>` : ""}
-    ${cleanupLine}`;
+    ${cleanupLine}
+    <div class="t-actions">${traceLine}
+      <button type="button" class="t-reset">Reset plant</button>
+    </div>`;
+
+  /* Offered, not done automatically. Running an attack used to be able to
+   * reset the plant on the participant's behalf, which discards every work
+   * order and maintenance record they had raised — a thing to be asked for,
+   * not a side effect. The button is right where they are already looking. */
+  body.querySelector(".t-reset").addEventListener("click", (e) => {
+    e.stopPropagation();
+    resetPlant();
+  });
 }
 
 function handleEvalEvent(ev) {
@@ -763,6 +799,62 @@ function clearTranscript(reason) {
   );
 }
 
+/* What the console shows while the agent is thinking.
+ *
+ * A blinking block on its own line, which is what this screen already uses
+ * for "the machine has the floor" — and the reason it was taken off the foot
+ * of a *finished* answer, where it read as "still going". Here that reading
+ * is the correct one.
+ *
+ * The elapsed seconds are the part a spinner cannot give. A turn here is a
+ * multi-step tool chain through a shared model endpoint that answers 429
+ * under load, so thirty seconds of silence is normal and two minutes is not;
+ * without a number on screen those look identical and the participant's only
+ * move is to reload and lose the conversation.
+ *
+ * Torn down by the first thing the agent produces — a token, a tool call, or
+ * an error — so it never overlaps real output.
+ */
+let pendingTimer = null;
+
+function startPending() {
+  stopPending();
+  const chat = $("chat");
+  const pinned = isPinned(chat);
+  chat.querySelector(".cursor-line")?.remove();
+
+  const line = document.createElement("p");
+  line.className = "line agent pending";
+  const tag = document.createElement("span");
+  tag.className = "tag";
+  tag.textContent = "assistant: ";
+  const cursor = document.createElement("span");
+  cursor.className = "cursor";
+  const wait = document.createElement("span");
+  wait.className = "wait";
+  line.append(tag, cursor, wait);
+  chat.appendChild(line);
+  stick(chat, pinned);
+
+  const started = Date.now();
+  const tick = () => {
+    const s = Math.round((Date.now() - started) / 1000);
+    // Silent for the first couple of seconds: a fast answer should not flash
+    // a timer on its way past.
+    wait.textContent = s >= 2 ? `  thinking… ${s}s` : "";
+  };
+  tick();
+  pendingTimer = setInterval(tick, 1000);
+}
+
+function stopPending() {
+  if (pendingTimer) {
+    clearInterval(pendingTimer);
+    pendingTimer = null;
+  }
+  $("chat")?.querySelector(".line.pending")?.remove();
+}
+
 function remember(role, content) {
   const text = (content || "").trim();
   if (!text) return;
@@ -791,12 +883,14 @@ async function ask(event) {
   // history the request replays.
   const priorTurns = history.slice();
   remember("user", message);
+  startPending();
 
   const chat = $("chat");
   let replyLine = null;
   let replyText = "";
 
   const write = (text) => {
+    stopPending();
     const pinned = isPinned(chat);
     if (!replyLine) {
       chat.querySelector(".cursor-line")?.remove();
@@ -814,6 +908,9 @@ async function ask(event) {
   };
 
   const trace = (cls, text, link) => {
+    // Stopped even when the trace pane is off: a tool call means the agent is
+    // no longer thinking, whether or not this participant is watching them.
+    stopPending();
     if (!showTrace) return;
     const pinned = isPinned(chat);
     chat.querySelector(".cursor-line")?.remove();
@@ -913,6 +1010,7 @@ async function ask(event) {
     // the transcript from what the operator can see on screen.
     remember("assistant", replyText);
 
+    stopPending();
     chat.querySelector(".cursor-line")?.remove();
     // Always return to the foot when a turn completes: the answer is finished
     // and the prompt is waiting.
@@ -1025,17 +1123,37 @@ async function ask(event) {
       const armed = probes.attacks.filter((a) => a.enabled).length;
       const held = probes.attacks.length - armed;
 
-      /* Fill the picker. Held cases are listed but disabled, with the reason
-       * on the option — a participant who cannot see that a case never runs
-       * would reasonably assume they are defended against it. */
+      /* Fill the picker, grouped by the module each attack belongs to.
+       *
+       * Flat, the seven titles are a wall of similar-sounding sentences and
+       * nothing says which one goes with the chapter the participant is on.
+       * The grouping comes from the definitions' own maps_to_module, so it
+       * cannot drift from the lab content.
+       *
+       * Held cases are listed but disabled, with the reason on the option — a
+       * participant who cannot see that a case never runs would reasonably
+       * assume they are defended against it. */
       const sel = $("attack-choice");
+      const groups = new Map();
       for (const a of probes.attacks) {
-        const opt = document.createElement("option");
-        opt.value = a.id;
-        opt.textContent = a.enabled ? a.title : `${a.title} — not armed`;
-        opt.disabled = !a.enabled;
-        if (a.disabledReason) opt.title = a.disabledReason;
-        sel.appendChild(opt);
+        const key = a.module || "";
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(a);
+      }
+      for (const key of [...groups.keys()].sort()) {
+        const parent = key
+          ? Object.assign(document.createElement("optgroup"),
+                          { label: MODULE_NAMES[key] || key })
+          : sel;
+        for (const a of groups.get(key)) {
+          const opt = document.createElement("option");
+          opt.value = a.id;
+          opt.textContent = a.enabled ? a.title : `${a.title} — not armed`;
+          opt.disabled = !a.enabled;
+          if (a.disabledReason) opt.title = a.disabledReason;
+          parent.appendChild(opt);
+        }
+        if (parent !== sel) sel.appendChild(parent);
       }
       /* Say how many are not armed. A participant who cannot see that three of
        * the seven attacks never fire would reasonably conclude they are

@@ -748,6 +748,12 @@ class _Agent:
         )
 
 
+def _async_return(value):
+    async def _f(*_a, **_k):
+        return value
+    return _f
+
+
 def _engine(agent: _Agent, state: dict, monkeypatch, cases) -> Engine:
     monkeypatch.setattr("waterplant_ui.harness.PROTOCOL", "openai")
     plant_state = dict(state)
@@ -1165,10 +1171,16 @@ async def test_trace_lookup_waits_for_the_exporter_then_gives_up(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_an_eval_sweep_resets_the_plant_and_says_so(monkeypatch, cases):
-    """A score only means something next to the last one if both sweeps
-    started from the same plant — and the console has to clear with it,
-    because the transcript above now describes a plant that is gone."""
+async def test_an_eval_sweep_does_not_reset_the_plant_on_its_own(monkeypatch, cases):
+    """Running evals must not silently discard the participant's work.
+
+    This used to reseed first, on the argument that two scores only compare
+    if both sweeps started from the same plant. True, and not the console's
+    call to make: a reset throws away every work order and maintenance record
+    they have raised, and doing that as a side effect of pressing "run evals"
+    destroys work they never offered up. The notification carries a Reset
+    button instead, so the same reset is one click away and theirs to choose.
+    """
     events.reset()
     monkeypatch.setattr("waterplant_ui.harness.PROTOCOL", "openai")
     hits = []
@@ -1189,10 +1201,8 @@ async def test_an_eval_sweep_resets_the_plant_and_says_so(monkeypatch, cases):
     )
     await engine.run_all_evals()
 
-    assert "/reset" in hits, "the sweep should reseed the plant first"
-    resets = [e for e in events.since(0) if e.get("id") == "plant-reset"]
-    assert resets, "the console must be told, or it cannot clear the transcript"
-    assert "work orders" in resets[0]["detail"].lower()
+    assert "/reset" not in hits, "the sweep must not reseed the plant by itself"
+    assert not [e for e in events.since(0) if e.get("id") == "plant-reset"]
 
 
 @pytest.mark.asyncio
@@ -1350,6 +1360,32 @@ async def test_evals_are_not_echoed(monkeypatch, cases):
 
 
 @pytest.mark.asyncio
+async def test_a_reset_still_tells_the_console_to_clear():
+    """However it is triggered, a reset has to announce itself.
+
+    The transcript above a reset describes a plant that no longer exists, so
+    the console clears on this event. Covered separately now that no sweep
+    produces one on its own.
+    """
+    events.reset()
+    hits: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        hits.append(request.url.path)
+        return httpx.Response(200, json=_state())
+
+    engine = Engine(
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        agent_url="", plant_api_url="http://plant", cases=[],
+    )
+    await engine._reset_plant("Reset by the operator.")
+
+    assert "/reset" in hits
+    resets = [e for e in events.since(0) if e.get("id") == "plant-reset"]
+    assert resets and "work orders" in resets[0]["detail"].lower()
+
+
+@pytest.mark.asyncio
 async def test_a_reset_puts_the_report_back():
     """Any reset, not only this attack's cleanup.
 
@@ -1433,3 +1469,51 @@ async def test_reports_restore_will_not_claim_success_if_the_file_is_missing():
 
     assert result.attempted and not result.succeeded
     assert "still missing" in result.detail
+
+
+@pytest.mark.asyncio
+async def test_an_attack_notification_carries_its_own_trace_link(monkeypatch, cases):
+    """The attack is the turn a participant most wants to open.
+
+    Every typed turn in the chat pane ends with a trace link; until the
+    lookup was added here, the one turn that never offered it was the attack
+    — the sweep resolved its traces inside the MLflow run writer and nothing
+    on the single-attack path ever did.
+    """
+    events.reset()
+    monkeypatch.setattr(
+        "waterplant_ui.probes.mlflow_run.trace_url_for_session",
+        _async_return("https://mlflow.example/#/experiments/7/traces?x=1"),
+    )
+    agent = _Agent("Pump 4 is stopped.")
+    engine = _engine(agent, _state(), monkeypatch, cases)
+    case = next(c for c in engine.attacks() if c.id == "unauthorized-control-action")
+
+    await engine.run_attack(case)
+
+    resolved = [e for e in events.since(0)
+                if e["kind"] == "attack" and e["phase"] == "resolved"][0]
+    assert resolved["traceUrl"].startswith("https://mlflow.example/")
+    assert resolved["session"]
+
+
+@pytest.mark.asyncio
+async def test_a_missing_trace_does_not_sink_the_attack_result(monkeypatch, cases):
+    """MLflow being slow or absent costs a link, not a verdict."""
+    events.reset()
+
+    async def boom(_session):
+        raise RuntimeError("mlflow unreachable")
+
+    monkeypatch.setattr(
+        "waterplant_ui.probes.mlflow_run.trace_url_for_session", boom)
+    agent = _Agent("Pump 4 is stopped.")
+    engine = _engine(agent, _state(), monkeypatch, cases)
+    case = next(c for c in engine.attacks() if c.id == "unauthorized-control-action")
+
+    result = await engine.run_attack(case)
+
+    assert result.outcome in ("got_through", "blocked", "declined")
+    resolved = [e for e in events.since(0)
+                if e["kind"] == "attack" and e["phase"] == "resolved"][0]
+    assert resolved["traceUrl"] == ""

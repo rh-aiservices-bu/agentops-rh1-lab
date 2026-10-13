@@ -12,6 +12,7 @@ leaving a dead minute where something is happening and nothing says so.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import secrets
 import uuid
@@ -20,8 +21,10 @@ from typing import Any
 
 import httpx
 
-from . import agent, cleanup, events, goals, loader, plant
+from . import agent, cleanup, events, goals, loader, mlflow_run, plant
 from .loader import Case
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -68,13 +71,17 @@ class Outcome:
 RESET_BEFORE_ATTACK = os.environ.get(
     "PROBE_RESET_BEFORE_ATTACK", "0"
 ).strip().lower() in ("1", "true", "yes")
-#: Reseed before an eval sweep. On by default, unlike the attack equivalent:
-#: a sweep is a deliberate act with a score at the end, and that score only
-#: means something next to the last one if both started from the same plant.
-#: An attack, by contrast, can fire on a timer, where resetting would throw
-#: away the participant's work every few minutes.
+#: Reseed before an eval sweep. Off by default, like the attack equivalent.
+#:
+#: It used to be on, on the argument that two scores only compare if both
+#: started from the same plant. True, and not worth taking the decision away
+#: from the participant: a reset discards every work order and maintenance
+#: record they have raised, and doing that silently as a side effect of
+#: pressing "run evals" destroys work they did not offer up. The notification
+#: now carries a Reset button instead, so the same reset is one click away
+#: and it is theirs to make.
 RESET_BEFORE_EVALS = os.environ.get(
-    "PROBE_RESET_BEFORE_EVALS", "1"
+    "PROBE_RESET_BEFORE_EVALS", "0"
 ).strip().lower() in ("1", "true", "yes")
 
 
@@ -364,7 +371,7 @@ class Engine:
                     "write-report eval plants, and no decoy exists yet — run "
                     "the eval suite first",
                 )
-                self._emit_resolved(case, result)
+                await self._emit_resolved(case, result)
                 return result
 
         if RESET_BEFORE_ATTACK:
@@ -393,7 +400,7 @@ class Engine:
                     case.id, case.title, "inconclusive",
                     f"attack not run: {why}",
                 )
-                self._emit_resolved(case, result)
+                await self._emit_resolved(case, result)
                 return result
             before = await plant.snapshot(self._client, self._plant_api_url)
 
@@ -487,13 +494,23 @@ class Engine:
                 attempted=False, detail="attack did not land — nothing to undo"
             )
             result.cleanup = done.as_event()
-            self._emit_resolved(case, result)
+            await self._emit_resolved(case, result)
 
-    def _emit_resolved(self, case: Case, result: Outcome) -> None:
+    async def _emit_resolved(self, case: Case, result: Outcome) -> None:
+        # Resolved before the event, not after: the console renders the
+        # notification once and a link that arrives later would have nowhere
+        # to go. The lookup polls, so this is where the attack's few seconds
+        # of waiting are spent.
+        trace_url = ""
+        try:
+            trace_url = await mlflow_run.trace_url_for_session(result.session_id)
+        except Exception:  # noqa: BLE001 - a missing link must not sink a result
+            log.exception("could not resolve the trace for %s", case.id)
         events.emit(
             kind="attack", phase="resolved", id=case.id, title=case.title,
             severity=case.severity, blurb=case.blurb,
             outcome=result.outcome, detail=result.detail, cleanup=result.cleanup,
+            traceUrl=trace_url, session=result.session_id,
         )
 
     async def _run_eval(self, case: Case, cycle_id: str) -> Outcome:

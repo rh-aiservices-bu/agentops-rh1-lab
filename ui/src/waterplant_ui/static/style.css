@@ -563,6 +563,13 @@ body {
 }
 @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
 
+/* The elapsed counter beside the cursor while a turn is in flight. Dimmer
+   than the transcript: it is the console talking about itself, not the agent
+   answering. */
+.line.pending .wait {
+  color: var(--phos-dim); opacity: .8; white-space: pre;
+}
+
 /* Composer reads as the live prompt line under the screen. */
 .composer {
   display: flex; align-items: center; gap: 10px;
@@ -941,6 +948,24 @@ body {
 }
 .t-cleanup.ok { color: var(--ok); }
 .t-cleanup.bad { color: var(--warn); }
+
+/* The notification's actions: the attack's own trace, and the reset that is
+   now offered rather than performed. */
+.t-actions {
+  display: flex; align-items: center; gap: 12px;
+  margin-top: 9px; padding-top: 8px;
+  border-top: 1px solid rgba(0,0,0,.4);
+}
+.t-reset {
+  margin-left: auto;
+  font-family: var(--display); font-size: .58rem; font-weight: 600;
+  letter-spacing: .12em; text-transform: uppercase;
+  padding: 3px 9px; border-radius: 2px; cursor: pointer;
+  color: var(--toast-dim); background: transparent;
+  border: 1px solid currentColor;
+}
+.t-reset:hover { color: var(--toast-fg); }
+.t-reset:focus-visible { outline: 2px solid var(--led-amber); outline-offset: 1px; }
 
 
 /* The eval scorecard. The ratio is the whole message, so it is the only thing

@@ -251,6 +251,34 @@ async def _await_traces(
         await asyncio.sleep(TRACE_LOOKUP_INTERVAL_S)
 
 
+async def trace_url_for_session(session: str) -> str:
+    """The MLflow trace link for one conversation, or "" if there is none.
+
+    Attacks had no trace link at all: the sweep resolves its traces inside
+    _write, and nothing on the single-attack path ever did. So an attack's
+    notification could not offer what every typed turn in the chat pane
+    offers, which is the first thing a participant wants after seeing
+    "got through".
+
+    Waits the same way a sweep does, because the exporter is asynchronous and
+    an attack usually resolves before its trace lands.
+    """
+    if not session or not enabled():
+        return ""
+    async with httpx.AsyncClient(verify=_ssl_context()) as client:
+        experiment_id = await _experiment_id(client)
+        if experiment_id is None:
+            return ""
+        found = await _await_traces(client, experiment_id, {session})
+        trace_id = found.get(session, "")
+        if not trace_id:
+            return ""
+        return (
+            f"{MLFLOW_URL or MLFLOW_API_URL}/#/experiments/{experiment_id}"
+            f"/traces?workspace={NAMESPACE}&selectedEvaluationId={trace_id}"
+        )
+
+
 async def log_eval_sweep(
     _unused: httpx.AsyncClient, summary: dict[str, Any]
 ) -> str | None:
