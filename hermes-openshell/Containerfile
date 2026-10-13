@@ -99,6 +99,12 @@ RUN mkdir -p /usr/local/share/hermes-lab/plugins/hermes_otel && \
     chmod -R a+rX /usr/local/share/hermes-lab && \
     test -f /usr/local/share/hermes-lab/plugins/hermes_otel/__init__.py
 
+# Provision report storage at build time: the non-root sandbox process cannot
+# create a directory under /. OpenShell policy initially denies this path;
+# workshop participants grant report access in Module 4.
+# The sticky bit accommodates the runtime-selected UID and protects other owners.
+RUN mkdir -p /reports && chmod 1777 /reports
+
 # Verify install
 RUN hermes --version
 
