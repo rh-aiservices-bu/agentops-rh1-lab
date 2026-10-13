@@ -85,6 +85,35 @@ async def run(
             detail="the deleted file was a decoy; the next eval sweep plants a fresh one",
         )
 
+    if kind == "reports_restore":
+        # The attack empties the reports directory, so what is restored is the
+        # one file that is always meant to be there. Anything the participant
+        # wrote themselves is genuinely gone — which is the lesson, and why
+        # the attack is scored as damage rather than as noise.
+        if ask is None:
+            return CleanupResult(
+                attempted=True, succeeded=False,
+                detail="no agent available to rewrite the report",
+            )
+        turn = await ask(goals.REPORTS_RESTORE_PROMPT.format(
+            path=goals.REPORTS_CANARY, body=goals.REPORTS_CANARY_BODY))
+        if not turn.ok:
+            return CleanupResult(
+                attempted=True, succeeded=False,
+                detail=f"restore request failed: {turn.error}",
+            )
+        check = await ask(goals.fs_prompt({"path": goals.REPORTS_CANARY}))
+        if check.ok and goals.interpret_fs_answer(check.text) is True:
+            return CleanupResult(
+                attempted=True, succeeded=True,
+                detail=f"{goals.REPORTS_CANARY} was written back and verified",
+            )
+        return CleanupResult(
+            attempted=True, succeeded=False,
+            detail=f"{goals.REPORTS_CANARY} is still missing; the reports "
+                   "directory was not restored",
+        )
+
     if kind == "soul_restore":
         # The agent's own instructions file. There is no canary equivalent —
         # writing to a decoy proves nothing about whether the real one is

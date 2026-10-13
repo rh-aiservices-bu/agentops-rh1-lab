@@ -1340,3 +1340,96 @@ async def test_evals_are_not_echoed(monkeypatch, cases):
     await engine.run_all_evals()
 
     assert [e for e in events.since(0) if e["kind"] == "turn"] == []
+
+
+# -- the always-present report -----------------------------------------------
+#
+# deleted-reports empties the reports directory. The file it destroys is
+# seeded at agent start by the charts and written back here after any reset,
+# so the attack never depends on an eval sweep having planted a decoy first.
+
+
+@pytest.mark.asyncio
+async def test_a_reset_puts_the_report_back():
+    """Any reset, not only this attack's cleanup.
+
+    The file is part of the starting state, so a participant who resets after
+    any attack should get it back. It lives in the agent's own filesystem, so
+    the only way in is to ask the agent.
+    """
+    asked: list[str] = []
+
+    async def ask(prompt: str):
+        asked.append(prompt)
+        return TurnResult(text="DONE")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={})))
+    engine = Engine(client=client, agent_url="http://agent",
+                    plant_api_url="http://plant", cases=[])
+    engine._ask = ask  # type: ignore[assignment]
+
+    events.reset()
+    await engine._reset_plant("Reset for the test.")
+
+    assert len(asked) == 1
+    assert goals.REPORTS_CANARY in asked[0]
+    assert goals.REPORTS_CANARY_BODY.strip() in asked[0]
+    detail = [e for e in events.since(0) if e["id"] == "plant-reset"][0]["detail"]
+    assert "could not be put back" not in detail
+
+
+@pytest.mark.asyncio
+async def test_a_reset_says_so_when_the_report_cannot_be_restored():
+    """Silence would claim a starting state the agent never reached."""
+    async def ask(prompt: str):
+        return TurnResult(error="agent unreachable")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={})))
+    engine = Engine(client=client, agent_url="http://agent",
+                    plant_api_url="http://plant", cases=[])
+    engine._ask = ask  # type: ignore[assignment]
+
+    events.reset()
+    await engine._reset_plant("Reset for the test.")
+
+    detail = [e for e in events.since(0) if e["id"] == "plant-reset"][0]["detail"]
+    assert "could not be put back" in detail
+
+
+@pytest.mark.asyncio
+async def test_reports_restore_rewrites_the_file_and_verifies_it():
+    seen: list[str] = []
+
+    async def ask(prompt: str):
+        seen.append(prompt)
+        if prompt == goals.fs_prompt({"path": goals.REPORTS_CANARY}):
+            return TurnResult(text="PRESENT")
+        return TurnResult(text="DONE")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={})))
+    result = await cleanup.run({"type": "reports_restore"}, client=client,
+                               plant_api_url="", before=None, ask=ask)
+
+    assert result.attempted and result.succeeded
+    # Written, then read back -- not taken on trust.
+    assert len(seen) == 2
+    assert "verified" in result.detail
+
+
+@pytest.mark.asyncio
+async def test_reports_restore_will_not_claim_success_if_the_file_is_missing():
+    async def ask(prompt: str):
+        if prompt == goals.fs_prompt({"path": goals.REPORTS_CANARY}):
+            return TurnResult(text="ABSENT")
+        return TurnResult(text="DONE")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={})))
+    result = await cleanup.run({"type": "reports_restore"}, client=client,
+                               plant_api_url="", before=None, ask=ask)
+
+    assert result.attempted and not result.succeeded
+    assert "still missing" in result.detail

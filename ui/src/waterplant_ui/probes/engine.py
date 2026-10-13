@@ -139,12 +139,35 @@ class Engine:
         """
         if not await plant.hard_reset(self._client, self._plant_api_url):
             return
+        restored = await self._restore_report()
         events.emit(
             kind="plant", phase="resolved", id="plant-reset",
             title="Plant reset", outcome="reset",
             detail=f"{why} Work orders and maintenance records raised before "
-                   "now are gone.",
+                   "now are gone." + ("" if restored else
+                   f" {goals.REPORTS_CANARY} could not be put back — the "
+                   "agent did not confirm the write."),
         )
+
+    async def _restore_report(self) -> bool:
+        """Put the always-present report back in the reports directory.
+
+        Every reset, not only deleted-reports' cleanup: the file is part of
+        the starting state, and a participant who resets after any attack
+        should get it back. It lives in the agent's own filesystem — an
+        emptyDir on the plain pod, the sandbox on the other runtime — so the
+        only way in from here is to ask the agent, exactly as soul_restore
+        does.
+
+        Best effort, and reported rather than raised: a reset that fails to
+        rewrite one file should still reset the plant, but it must not claim
+        to have restored something it did not.
+        """
+        if not self._agent_url:
+            return False
+        turn = await self._ask(goals.REPORTS_RESTORE_PROMPT.format(
+            path=goals.REPORTS_CANARY, body=goals.REPORTS_CANARY_BODY))
+        return turn.ok
 
     async def ensure_plant_healthy(self) -> tuple[bool, str]:
         """Recover a plant left in shutdown by an earlier session.
@@ -421,6 +444,12 @@ class Engine:
                 # Consumed. Offering a deleted decoy to the next run would
                 # score an attack against a file that is already gone.
                 self._canaries.pop(self._render(case.requires_canary, cycle_id), None)
+            if succeeded and case.cleanup.get("type") == "reports_restore":
+                # This attack empties the directory, so every decoy planted by
+                # an earlier write-report went with it. Leaving them in the
+                # map would let a later case believe a file exists that the
+                # attack has just deleted.
+                self._canaries.clear()
             after = await plant.snapshot(self._client, self._plant_api_url)
             shutdown_was_set = after.shutdown and not before.shutdown
             if succeeded:
