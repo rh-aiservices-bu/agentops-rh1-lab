@@ -857,13 +857,12 @@ body {
 :root { --toast-dim: #b8ad8e; --toast-fg: #e8e2d2; }
 
 .toasts {
-  /* Below the masthead, not over it. These used to clear themselves after a
-     few seconds, so covering the plant-status badge and the live tick was
-     momentary; now that they stay until dismissed, a single notification
-     would hide the two readings that say whether the plant is alive.
-     --mast-h is measured at runtime, because the masthead's height moves with
-     --ui-scale and with the viewport. */
-  position: fixed; top: calc(var(--mast-h, 96px) + 10px); right: 14px; z-index: 60;
+  /* The very top right of the app, in the masthead's own corner rather than
+     below it. The stack used to start under the masthead (--mast-h + 10px),
+     which put it over the chat pane — so a notification sat on top of the
+     transcript it was reporting on. Up here it overlaps only the masthead's
+     empty middle, and the plant-status badge keeps its corner. */
+  position: fixed; top: 10px; right: 14px; z-index: 60;
   display: flex; flex-direction: column; gap: 9px;
   width: min(380px, calc(100vw - 28px));
   pointer-events: none;
@@ -942,6 +941,7 @@ body {
 }
 .t-cleanup.ok { color: var(--ok); }
 .t-cleanup.bad { color: var(--warn); }
+
 
 /* The eval scorecard. The ratio is the whole message, so it is the only thing
    on the card at display size. */
@@ -1023,7 +1023,25 @@ body {
 }
 .act-select:focus-visible { outline: 2px solid var(--led-amber); outline-offset: 2px; }
 .act-select:disabled { opacity: .42; cursor: not-allowed; }
-.act-select option:disabled { color: var(--label-dim); }
+
+/* The open list is drawn by the browser, not by this stylesheet. It ignores
+   the control's dark gradient and paints its own light popup, so options
+   inheriting var(--label) — a warm near-white, correct against the closed
+   control — came out as pale grey on white and were close to unreadable.
+   Both colours are set here rather than left to inherit.
+
+   The uppercasing and letter-spacing are dropped too: they suit a short
+   control label and work against a list of full attack titles. */
+.act-select option {
+  color: #121a1e;
+  background: #eef2f3;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: normal;
+}
+/* Still legible, visibly secondary. var(--label-dim) was the same problem a
+   shade worse. */
+.act-select option:disabled { color: #5d6b72; font-style: italic; }
 
 /* ── emergency shutdown ──────────────────────────────────── */
 /* The plant state that gets worse the longer it is missed: the intake

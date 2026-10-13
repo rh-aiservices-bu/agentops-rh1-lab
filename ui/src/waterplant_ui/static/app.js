@@ -441,6 +441,26 @@ function dismissToast(el) {
 }
 
 function handleProbeEvent(ev) {
+  /* An attack's turns, rendered exactly as a typed one would be.
+   *
+   * The participant has to be able to see what was said to the agent and what
+   * it answered — a toast saying "got through" without the exchange behind it
+   * asks them to take the verdict on trust.
+   *
+   * Adopting ev.session is the half that keeps it honest. The attack runs in
+   * its own Hermes conversation, so without this the transcript would show an
+   * exchange the agent has no memory of and "why did you do that?" would be
+   * answered by a different session. Taking the id over means the console
+   * continues the conversation the attack actually had.
+   *
+   * remember() too, for the stateless native agent, which is replayed the
+   * on-screen transcript rather than keeping a session of its own. */
+  if (ev.kind === "turn") {
+    if (ev.session && ev.session !== conversationId) conversationId = ev.session;
+    addMessage(ev.role, ev.text, ev.persona);
+    if (ev.role !== "system") remember(ev.role, ev.text);
+    return;
+  }
   if (ev.kind === "plant") {
     /* Clear the transcript with the plant. After a reset the conversation
      * above refers to pumps, work orders and readings that no longer exist,
@@ -667,7 +687,7 @@ function personaSlug() {
    used to be, and a blinking block under a finished answer reads as "still
    thinking" — the one thing a transcript should never be ambiguous about.
    The composer below already shows where input goes. */
-function addMessage(role, text) {
+function addMessage(role, text, persona) {
   const chat = $("chat");
   const pinned = isPinned(chat);
   chat.querySelector(".cursor-line")?.remove();
@@ -678,7 +698,11 @@ function addMessage(role, text) {
   if (role === "user") {
     const p = document.createElement("span");
     p.className = "prompt";
-    p.textContent = `${personaSlug()}@northgate ~ % `;
+    /* `persona` is passed only for an echoed attack turn, which always asks
+       as the operator. Falling back to the picker would label the attack with
+       whichever identity the participant happens to have selected — wrong
+       about exactly the thing the identity attacks are testing. */
+    p.textContent = `${persona || personaSlug()}@northgate ~ % `;
     line.appendChild(p);
   } else if (role === "system") {
     const t = document.createElement("span");
@@ -957,18 +981,6 @@ async function ask(event) {
     );
   }
 
-  /* Keep the toast stack clear of the masthead. Measured rather than guessed:
-   * the header's height changes with --ui-scale and with the viewport, and a
-   * hardcoded offset would either overlap it or float below a gap. */
-  const trackMastHeight = () => {
-    const mast = document.querySelector(".mast");
-    if (!mast) return;
-    const r = mast.getBoundingClientRect();
-    document.documentElement.style.setProperty("--mast-h", `${Math.round(r.bottom)}px`);
-  };
-  trackMastHeight();
-  addEventListener("resize", trackMastHeight);
-
   $("run-attack").addEventListener("click", runAttack);
   $("run-evals").addEventListener("click", runEvals);
   $("reset-plant").addEventListener("click", resetPlant);
@@ -1031,7 +1043,7 @@ async function ask(event) {
       $("run-attack").title =
         `${armed} of ${probes.attacks.length} attacks are armed` +
         (held ? ` — ${held} need infrastructure that does not exist yet` : "") +
-        ". Fires one at random now." +
+        ". Fires the selected attack now, or a random one." +
         (probes.scheduled
           ? ""
           : " Automatic attacks are switched off, so this button is the only way one runs.");

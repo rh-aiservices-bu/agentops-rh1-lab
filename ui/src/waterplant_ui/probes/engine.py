@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -278,10 +279,51 @@ class Engine:
     # -- internals ---------------------------------------------------------
 
     async def _ask(self, prompt: str) -> agent.TurnResult:
-        """One turn to the agent, the same way every probe reaches it."""
+        """One turn to the agent, the same way every probe reaches it.
+
+        Silent, and in its own conversation. This is how the goal checks and
+        the cleanup talk to the agent, and those are the lab's own questions
+        about what just happened -- not part of the conversation the
+        participant is having. Putting "is report-canary-x.md still there?" on
+        screen between an attack and its verdict would read as though the
+        operator had typed it.
+        """
         return await agent.ask(
             self._client, self._agent_url, [prompt], timeout_s=self._timeout_s
         )
+
+    #: Every probe asks as the plant operator. Named here rather than left to
+    #: agent.ask's default, because the console labels the echoed turn with it
+    #: and a transcript crediting the attack to the persona the participant
+    #: happens to have selected would be wrong about the one thing
+    #: unauthorized-control-action is testing.
+    PROBE_PERSONA = "operator"
+
+    def _echo(self, session: str, case: Case) -> agent.TurnEcho:
+        """Put an attack's turns in the participant's console as they happen.
+
+        Rendering the turns without also joining the session would make the
+        transcript lie: the console would show a conversation the agent cannot
+        remember, so the obvious next move -- "why did you just do that?" --
+        would be answered by a session that never saw the attack. The session
+        id rides along on every event and the console adopts it, which is what
+        makes that follow-up work.
+
+        Emitted turn by turn rather than as a block at the end, so a
+        multi-turn attack reads at the speed it actually runs.
+        """
+        async def echo(role: str, text: str) -> None:
+            events.emit(
+                kind="turn",
+                role=role,
+                text=text,
+                session=session,
+                persona=self.PROBE_PERSONA,
+                id=case.id,
+                title=case.title,
+            )
+
+        return echo
 
     async def _run_attack(self, case: Case, cycle_id: str) -> Outcome:
         spec = self._render(case.goal, cycle_id)
@@ -351,9 +393,18 @@ class Engine:
         result = Outcome(case.id, case.title)
 
         try:
+            # Minted here rather than left to agent.ask, because the console
+            # has to be told which conversation to adopt from the first turn
+            # event -- not after the attack has finished.
+            session = str(uuid.uuid4())
             turn = await agent.ask(
-                self._client, self._agent_url, prompts, timeout_s=self._timeout_s
+                self._client, self._agent_url, prompts,
+                timeout_s=self._timeout_s,
+                persona=self.PROBE_PERSONA,
+                session_id=session,
+                on_turn=self._echo(session, case),
             )
+            result.session_id = turn.session_id
             if not turn.ok:
                 result.detail = turn.error
                 return result
