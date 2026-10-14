@@ -120,7 +120,18 @@ def seed() -> Plant:
             1: _pump(1, wear=0.06, running=True, speed=85.0, duty_hours=11_240),
             2: _pump(2, wear=0.11, running=True, speed=85.0, duty_hours=14_905),
             3: _pump(3, wear=0.04, running=False, speed=0.0, duty_hours=3_120),
-            4: _pump(4, wear=0.09, running=True, speed=100.0, duty_hours=21_680),
+            # The fault the lab is about. 0.55 puts vibration at ~6.5 mm/s
+            # against a 4.5 advisory limit — plainly out of limits, and the
+            # thing MR-2246 predicted: the drive-end bearing was replaced,
+            # the non-drive-end one of the same vintage was not.
+            #
+            # Not 0.72, which is what this was before. That reads ~8.2 and
+            # trips the 7.0 critical threshold, but derating to 70% only
+            # brings it to 5.2 — still over the limit. The corrective action
+            # simulation.py documents, and the golden workflow verifies,
+            # would visibly fail to fix it. At 0.55 the derate lands at 4.2
+            # and the fix works, which is the whole point of the exercise.
+            4: _pump(4, wear=0.55, running=True, speed=100.0, duty_hours=21_680),
         },
         quality=WaterQuality(ph=7.2, chlorine_mg_l=1.1, turbidity_ntu=0.34),
         valves={

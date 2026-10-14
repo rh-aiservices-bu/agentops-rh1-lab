@@ -10,7 +10,12 @@ from __future__ import annotations
 import pytest
 
 from plant_api import safety, simulation
-from plant_api.state import MIN_CONTINUOUS_SPEED_PCT, seed
+from plant_api.state import (
+    MIN_CONTINUOUS_SPEED_PCT,
+    VIBRATION_CRIT_MM_S,
+    VIBRATION_WARN_MM_S,
+    seed,
+)
 
 
 def advance(plant, seconds: int, dt: float = 1.0) -> None:
@@ -23,40 +28,56 @@ def advance(plant, seconds: int, dt: float = 1.0) -> None:
 # --------------------------------------------------------------------------
 
 
-def test_seed_starts_every_pump_healthy():
-    """The console must open on a plant that is working.
+def test_the_seed_opens_with_pump_4_out_of_limits():
+    """The fault the lab is built around is there from the first tick.
 
-    Pump 4 used to seed at wear 0.72 — ~8.2 mm/s, discharge down to ~3.1 bar —
-    which put the whole console into a red CRITICAL the moment it loaded. It
-    now starts sound, so a panel going red means something happened in front
-    of the participant rather than a condition that was always there.
+    ~6.5 mm/s against a 4.5 advisory limit: plainly out of limits, and the
+    thing MR-2246 predicted when the drive-end bearing was replaced and the
+    non-drive-end one of the same vintage was not.
+
+    Deliberately not 0.72, which this was once. That reads ~8.2 and trips the
+    7.0 critical threshold, but derating to 70% only reaches 5.2 — still over
+    the limit — so the corrective action the golden workflow verifies would
+    visibly fail to fix it.
     """
     plant = seed()
     p4 = plant.pumps[4]
 
     assert p4.running
     assert p4.speed_pct == 100.0
-    assert p4.vibration_mm_s == pytest.approx(1.9, abs=0.3)
-    assert p4.discharge_bar == pytest.approx(4.41, abs=0.15)
-    assert p4.bearing_temp_c == pytest.approx(49.1, abs=1.5)
-    # Still the oldest unit on the site; its history is why it is the
-    # interesting one to ask about, without the plant having to be broken.
+    assert p4.vibration_mm_s == pytest.approx(6.5, abs=0.3)
+    assert p4.vibration_mm_s > VIBRATION_WARN_MM_S
+    assert p4.vibration_mm_s < VIBRATION_CRIT_MM_S
+    # The oldest unit on site, which is why its history is the one to ask about.
     assert p4.duty_hours == 21_680
 
 
-def test_the_plant_starts_with_no_breaches():
+def test_the_plant_opens_on_a_warning_not_a_crisis():
+    """Amber, not red.
+
+    A console that loads straight into CRITICAL gives a participant no way to
+    tell a fault they caused from one that was always there. A warning is
+    visible, diagnosable, and leaves somewhere worse to go when an attack
+    lands.
+    """
     report = safety.evaluate(seed())
-    breached = [(c.subject, c.metric, c.status) for c in report.checks if c.status != "ok"]
 
-    assert breached == []
-    assert report.status == "ok"
+    assert report.status == "warn"
+    assert not [c for c in report.checks if c.status == "critical"]
 
 
-def test_healthy_pumps_are_within_limits():
+def test_only_pump_4_is_out_of_limits():
     report = safety.evaluate(seed())
-    for pump_id in (1, 2, 3, 4):
+
+    for pump_id in (1, 2, 3):
         statuses = {c.status for c in report.checks if c.subject == f"pump-{pump_id}"}
-        assert statuses == {"ok"}, f"pump {pump_id} should start healthy"
+        assert statuses == {"ok"}, f"pump {pump_id} should start sound"
+
+    p4 = {c.metric: c.status for c in report.checks if c.subject == "pump-4"}
+    assert p4["vibration"] == "warn"
+    # Short of its own curve, because the bearing is worn — not because it is
+    # derated. It is still at 100%.
+    assert p4["head_deficit"] != "ok"
 
 
 # --------------------------------------------------------------------------
@@ -89,21 +110,41 @@ def test_a_worn_pump_reads_as_a_breach():
     assert report.status == "critical"
 
 
-def test_derating_a_worn_pump_brings_vibration_back_inside_limits():
+def test_derating_the_seeded_pump_brings_vibration_back_inside_limits():
     """The final verification step of the golden workflow.
 
     If this fails, the agent's recommended corrective action stops being
     correct and the whole lab narrative breaks.
+
+    Tested against the *seeded* wear, because that is the pump a participant
+    actually derates. The old version ran this on an injected 0.72 and
+    asserted 5.2 mm/s — above the 4.5 limit — so a test named "back inside
+    limits" was pinning a value outside them.
     """
-    plant = _worn()
+    plant = seed()
     before = plant.pumps[4].vibration_mm_s
 
     plant.pumps[4].speed_setpoint_pct = 70.0
-    advance(plant, 5)
+    advance(plant, 120)
     after = plant.pumps[4].vibration_mm_s
 
     assert after < before
-    assert after == pytest.approx(5.2, abs=0.3)
+    assert after < VIBRATION_WARN_MM_S
+    assert after == pytest.approx(4.2, abs=0.3)
+
+
+def test_a_severely_worn_pump_cannot_be_derated_out_of_trouble():
+    """Why the seed is 0.55 and not 0.72.
+
+    Past a certain wear, derating is no longer enough and the honest answer
+    is to stop the pump. Pinned so that nobody raises the seed without
+    noticing they have broken the corrective action.
+    """
+    plant = _worn(0.72)
+    plant.pumps[4].speed_setpoint_pct = 70.0
+    advance(plant, 120)
+
+    assert plant.pumps[4].vibration_mm_s > VIBRATION_WARN_MM_S
 
 
 def test_derating_clears_the_acute_risk_without_hiding_the_fault():
@@ -288,4 +329,6 @@ def test_reset_restores_the_seeded_state():
     fresh = seed()
     assert fresh.reservoir.level_pct == pytest.approx(62.4, abs=0.01)
     assert not fresh.valves["emergency_bypass"].open
-    assert fresh.pumps[4].vibration_mm_s == pytest.approx(1.9, abs=0.3)
+    # Back to the seeded fault, not to a sound pump: a reset restores the
+    # starting state, and pump 4 is worn in the starting state.
+    assert fresh.pumps[4].vibration_mm_s == pytest.approx(6.5, abs=0.3)
