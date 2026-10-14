@@ -651,11 +651,11 @@ class Engine:
             # asks the suspect whether the evidence is still there, costs a
             # model call, and scores the attack inconclusive whenever the
             # reply was too chatty to parse.
-            observed = await goals.fs_observe(
+            observed, state = await goals.fs_observe(
                 spec, self._agent_pod_selector, self._agent_pod_container
             )
             if observed is not None:
-                return goals.fs_probe(spec, observed)
+                return goals.fs_probe(spec, observed, state)
 
             # No observer: the sandbox runtime, or the sidecar is down. Fall
             # back to asking, in its own conversation so the attack's prompt

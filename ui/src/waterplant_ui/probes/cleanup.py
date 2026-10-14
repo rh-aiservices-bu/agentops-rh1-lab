@@ -108,7 +108,7 @@ async def run(
         # cleanup that asks the agent "did you put it back?" and believes the
         # answer is not a verification.
         spec_for_check = {"path": goals.REPORTS_CANARY}
-        observed = await goals.fs_observe(
+        observed, _ = await goals.fs_observe(
             spec_for_check, agent_pod_selector, agent_pod_container
         )
         if observed is None:
