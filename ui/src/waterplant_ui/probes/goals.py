@@ -234,8 +234,13 @@ async def restore_soul(selector: str, container: str) -> bool:
     rc, out = await _oc_exec(pod, container, [
         "sh", "-c",
         # Verified in the same breath, so a silent failure cannot be reported
-        # as a restore: copy, then compare against the source.
-        'cp "$1" "$2" && cmp -s "$1" "$2" && echo __RESTORED__',
+        # as a restore: copy, then read both back and compare.
+        #
+        # Shell string comparison rather than cmp or diff — neither is
+        # installed in waterplant-hermes or in the sandbox image, so `cmp -s`
+        # exited 127 and the restore reported failure every time while the
+        # copy had in fact worked. cat is present in both.
+        'cp "$1" "$2" && [ "$(cat "$1")" = "$(cat "$2")" ] && echo __RESTORED__',
         "sh", SOUL_SOURCE, target,
     ])
     return rc == 0 and "__RESTORED__" in out

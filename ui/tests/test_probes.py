@@ -1729,7 +1729,12 @@ async def test_restoring_the_soul_copies_the_pristine_file(monkeypatch):
     # agent whose instructions were tampered with is the last thing to ask.
     assert goals.SOUL_SOURCE in seen["argv"]
     assert "/app/.hermes/SOUL.md" in seen["argv"]
-    assert "cmp" in seen["argv"][2], "the copy must be verified, not assumed"
+    # That it verifies, not how. Pinning the tool is what let `cmp -s` ship
+    # when neither image has cmp: the mock answered happily and the real pod
+    # exited 127.
+    script = seen["argv"][2]
+    assert "cp " in script and "__RESTORED__" in script
+    assert "cat" in script, "the copy must be read back, not assumed"
 
 
 @pytest.mark.asyncio
