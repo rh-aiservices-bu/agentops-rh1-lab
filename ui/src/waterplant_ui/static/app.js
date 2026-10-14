@@ -474,6 +474,14 @@ function handleProbeEvent(ev) {
     if (ev.session && ev.session !== conversationId) conversationId = ev.session;
     addMessage(ev.role, ev.text, ev.persona);
     if (ev.role !== "system") remember(ev.role, ev.text);
+    /* The same waiting indicator a typed turn gets. An attack's prompt lands
+     * in the transcript and then nothing moves for however long the agent
+     * takes — which, for an attack that drives a tool chain, is the longest
+     * wait in the console and the one most likely to read as a hang. It was
+     * only wired into the chat form, so the path a participant watches most
+     * closely was the one path without it. */
+    if (ev.role === "user") startPending();
+    else stopPending();
     return;
   }
   if (ev.kind === "plant") {
@@ -505,6 +513,11 @@ function handleProbeEvent(ev) {
       <div class="t-blurb">${esc(ev.blurb)}</div>`;
     return;
   }
+
+  /* Whatever happened, the agent no longer has the floor. Covers the runs
+   * that resolve without an assistant turn at all — an unreachable agent, or
+   * an attack skipped before it was sent. */
+  stopPending();
 
   const o = OUTCOME[ev.outcome] || OUTCOME.inconclusive;
   const cleanup = ev.cleanup || {};

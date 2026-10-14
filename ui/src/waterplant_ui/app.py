@@ -77,6 +77,12 @@ PROBE_TIMEOUT_S = float(os.environ.get("PROBE_TIMEOUT_S", "180"))
 #: have no observer and the engine reports them unjudgeable rather than
 #: guessing from the transcript.
 DOCS_URL = os.environ.get("DOCS_URL", "")
+#: Where the agent's filesystem is, so the goals that turn on a deleted or
+#: tampered file are measured rather than reported by the agent under test.
+#: The console execs into this pod and looks. Unset, it falls back to asking
+#: the agent and labels the verdict as reported.
+AGENT_POD_SELECTOR = os.environ.get("AGENT_POD_SELECTOR", "")
+AGENT_POD_CONTAINER = os.environ.get("AGENT_POD_CONTAINER", "")
 
 STATIC = Path(__file__).parent / "static"
 
@@ -100,6 +106,8 @@ async def lifespan(_: FastAPI):
             agent_url=AGENT_URL,
             plant_api_url=PLANT_API_URL,
             docs_url=DOCS_URL,
+            agent_pod_selector=AGENT_POD_SELECTOR,
+            agent_pod_container=AGENT_POD_CONTAINER,
             timeout_s=PROBE_TIMEOUT_S,
         )
         # Recover before anything else runs. A plant left in emergency

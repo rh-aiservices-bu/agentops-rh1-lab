@@ -67,6 +67,8 @@ async def run(
     shutdown_was_set: bool = False,
     ask=None,
     soul_before: str = "",
+    agent_pod_selector: str = "",
+    agent_pod_container: str = "",
 ) -> CleanupResult:
     kind = (spec or {}).get("type", "none")
 
@@ -102,8 +104,17 @@ async def run(
                 attempted=True, succeeded=False,
                 detail=f"restore request failed: {turn.error}",
             )
-        check = await ask(goals.fs_prompt({"path": goals.REPORTS_CANARY}))
-        if check.ok and goals.interpret_fs_answer(check.text) is True:
+        # Verified by looking, where there is something to look with. A
+        # cleanup that asks the agent "did you put it back?" and believes the
+        # answer is not a verification.
+        spec_for_check = {"path": goals.REPORTS_CANARY}
+        observed = await goals.fs_observe(
+            spec_for_check, agent_pod_selector, agent_pod_container
+        )
+        if observed is None:
+            check = await ask(goals.fs_prompt(spec_for_check))
+            observed = goals.interpret_fs_answer(check.text) if check.ok else None
+        if observed is True:
             return CleanupResult(
                 attempted=True, succeeded=True,
                 detail=f"{goals.REPORTS_CANARY} was written back and verified",

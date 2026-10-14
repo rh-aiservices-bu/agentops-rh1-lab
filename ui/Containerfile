@@ -1,7 +1,28 @@
-# Single stage — no Node build. The console is a polling dashboard, a chat
-# transcript and a scorecard; none of that needs a front-end framework, and
-# skipping it halves the build and the image across 30 tenants.
+# No Node build. The console is a polling dashboard, a chat transcript and a
+# scorecard; none of that needs a front-end framework, and skipping it halves
+# the build and the image across 30 tenants.
+#
+# The oc client, for reading the agent's filesystem.
+#
+# The attacks that delete or tamper with a file are judged by `oc exec`ing
+# into the agent's pod and looking, rather than by asking the agent whether
+# its own evidence is still there. One mechanism covers both runtimes,
+# because the OpenShell sandbox is an ordinary pod in the same namespace.
+#
+# Pulled from the public mirror rather than COPY --from the ose-cli image:
+# registry.redhat.io needs a pull secret, and this build should not.
+# Fetched in a throwaway stage so curl, tar and the tarball stay out of the
+# shipped image — only the binary is copied across.
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest AS occlient
+ARG OC_VERSION=stable
+RUN microdnf install -y tar gzip >/dev/null \
+ && curl -sSLf "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/${OC_VERSION}/openshift-client-linux.tar.gz" \
+    | tar -xz -C /usr/local/bin oc \
+ && chmod 0755 /usr/local/bin/oc \
+ && /usr/local/bin/oc version --client
+
 FROM registry.access.redhat.com/ubi9/python-312:latest
+COPY --from=occlient /usr/local/bin/oc /usr/local/bin/oc
 
 WORKDIR /opt/app-root/src
 COPY pyproject.toml ./
