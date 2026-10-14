@@ -800,7 +800,17 @@ function addMessage(role, text, persona) {
   chat.querySelector(".cursor-line")?.remove();
 
   const line = document.createElement("p");
-  line.className = `line ${role}`;
+  /* "assistant" is the role the model API uses and what the turn events
+   * carry; "agent" is what this transcript has always called it in CSS and
+   * what the typed-chat path writes. Normalised here so both paths produce
+   * the same element.
+   *
+   * They did not. An echoed attack reply came out as `.line.assistant`,
+   * which is styled nowhere — so its tag missed the dim phosphor colour —
+   * and the trace lookup, which searches `.line.agent`, never found it. The
+   * "see the trace →" line silently failed to attach to exactly the turn a
+   * participant most wants to open. */
+  line.className = `line ${role === "assistant" ? "agent" : role}`;
 
   if (role === "user") {
     const p = document.createElement("span");

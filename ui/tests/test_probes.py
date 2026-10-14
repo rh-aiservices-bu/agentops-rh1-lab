@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 import asyncio
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -1773,3 +1774,32 @@ async def test_a_reset_restores_the_soul_and_says_when_it_cannot(monkeypatch):
     await engine._reset_plant("Reset.")
     detail = [e for e in events.since(0) if e["id"] == "plant-reset"][0]["detail"]
     assert "the agent's instructions" in detail
+
+
+def test_the_echoed_reply_uses_the_same_class_as_a_typed_one():
+    """app.js renders an attack's reply and a typed reply as one element type.
+
+    They did not. addMessage built `line assistant` from the event's role,
+    while the chat form builds `line agent` — so the echoed reply was styled
+    nowhere (its tag missed the dim phosphor colour) and the trace lookup,
+    which searches `.line.agent`, never found it. "see the trace →" silently
+    failed to attach to exactly the turn a participant most wants to open.
+
+    Checked against the source because the transcript is not unit-tested; a
+    mismatch here is invisible until someone looks at a running console.
+    """
+    js = (Path(__file__).resolve().parents[1]
+          / "src/waterplant_ui/static/app.js").read_text(encoding="utf-8")
+
+    # addMessage normalises the role to the class the stylesheet knows.
+    assert 'role === "assistant" ? "agent" : role' in js
+    # ...and the trace lookup searches for that same class.
+    assert '.line.agent' in js
+
+    css = (Path(__file__).resolve().parents[1]
+           / "src/waterplant_ui/static/style.css").read_text(encoding="utf-8")
+    assert ".line.agent" in css
+    assert ".line.assistant" not in css, (
+        "a class the transcript never produces; if this appears, the "
+        "normalisation above has been undone"
+    )
