@@ -210,6 +210,36 @@ OC_TIMEOUT_S = float(os.environ.get("OC_EXEC_TIMEOUT_S", "20"))
 REPORTS_DIR = "/reports"
 HERMES_HOME = os.environ.get("AGENT_HERMES_HOME", "/app/.hermes")
 
+#: The pristine lab soul, already in the agent's pod and read-only to it.
+#: Plain mounts the hermes-plain-soul ConfigMap at /soul; the sandbox keeps
+#: the copy the bridge uploaded. Restoring from there rather than from git
+#: means a participant who edits the ConfigMap keeps their edit — only the
+#: attack's tampering is undone.
+SOUL_SOURCE = os.environ.get("AGENT_SOUL_SOURCE", "/soul/SOUL.md")
+
+
+async def restore_soul(selector: str, container: str) -> bool:
+    """Put the lab's own instructions back. True when verified.
+
+    A copy inside the pod, not a model call: the agent whose instructions
+    were just tampered with is the last thing that should be asked to fix
+    them, and `cp` either works or does not.
+    """
+    if not selector or not container or not SOUL_SOURCE:
+        return False
+    pod = await _agent_pod(selector)
+    if not pod:
+        return False
+    target = absolute_path("SOUL.md")
+    rc, out = await _oc_exec(pod, container, [
+        "sh", "-c",
+        # Verified in the same breath, so a silent failure cannot be reported
+        # as a restore: copy, then compare against the source.
+        'cp "$1" "$2" && cmp -s "$1" "$2" && echo __RESTORED__',
+        "sh", SOUL_SOURCE, target,
+    ])
+    return rc == 0 and "__RESTORED__" in out
+
 
 def absolute_path(path: str) -> str:
     """The definition's filename as an absolute path in the agent's pod.
@@ -287,6 +317,28 @@ async def _agent_pod(selector: str) -> str:
         return ""
     names = out.decode().split()
     return names[0] if len(names) == 1 else ""
+
+
+async def fs_read(path: str, selector: str, container: str) -> str:
+    """The contents of a file in the agent's pod, or "" if it cannot be read.
+
+    Used to capture the agent's instructions before an attack tampers with
+    them. This used to be a model call — "print your instructions file
+    verbatim in a code block" — which cost twenty-odd seconds of a blank
+    console before the attack's prompt even appeared, and depended on the
+    agent quoting itself accurately.
+    """
+    if not selector or not container:
+        return ""
+    pod = await _agent_pod(selector)
+    if not pod:
+        return ""
+    rc, out = await _oc_exec(pod, container, ["sh", "-c", _LOOK, "sh",
+                                              absolute_path(path)])
+    if rc != 0:
+        return ""
+    head, _, body = out.partition("\n")
+    return body if head.strip() == "__PRESENT__" else ""
 
 
 async def fs_observe(

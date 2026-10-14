@@ -455,6 +455,35 @@ function dismissToast(el) {
   }, 300);
 }
 
+/* Append a trace link to the attack's reply in the transcript.
+ *
+ * Typed turns end with "see the trace →"; an attack's reply did not, which
+ * made the one turn a participant most wants to inspect the only one without
+ * a way in. The line is found by the session it was rendered with rather than
+ * by position, so a reply that has since scrolled up still gets its link. */
+function attachTraceToTranscript(session, url) {
+  if (!session) return;
+  const line = [...$("chat").querySelectorAll(".line.agent")]
+    .reverse()
+    .find((l) => l.dataset.session === session);
+  if (!line || line.querySelector(".trace-link")) return;
+
+  const note = document.createElement("span");
+  note.className = url ? "trace-link" : "trace-link none";
+  if (url) {
+    const a = document.createElement("a");
+    a.href = url;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.textContent = "see the trace →";
+    note.appendChild(a);
+  } else {
+    note.textContent = "no trace was collected for this turn";
+  }
+  line.appendChild(note);
+  stick($("chat"), isPinned($("chat")));
+}
+
 function handleProbeEvent(ev) {
   /* An attack's turns, rendered exactly as a typed one would be.
    *
@@ -480,8 +509,34 @@ function handleProbeEvent(ev) {
      * wait in the console and the one most likely to read as a hang. It was
      * only wired into the chat form, so the path a participant watches most
      * closely was the one path without it. */
-    if (ev.role === "user") startPending();
-    else stopPending();
+    if (ev.role === "user") {
+      startPending();
+    } else {
+      stopPending();
+      /* Tagged with its session so the trace event can find this line again
+       * and append the link, the same way a typed turn ends with one. */
+      if (ev.role === "assistant" && ev.session) {
+        const last = $("chat").lastElementChild;
+        if (last) last.dataset.session = ev.session;
+      }
+    }
+    return;
+  }
+  /* The trace link, arriving after the verdict.
+   *
+   * MLflow's exporter is asynchronous, so an attack is usually over before
+   * its trace is searchable. The verdict no longer waits for it — this fills
+   * in both places it belongs: the notification, and the transcript line, so
+   * an attack reads exactly like a typed turn. */
+  if (ev.kind === "trace") {
+    const el = liveToasts.get(`attack:${ev.id}`);
+    const slot = el?.querySelector(".t-tracewrap");
+    if (slot) {
+      slot.innerHTML = ev.traceUrl
+        ? `<a class="t-trace" href="${esc(ev.traceUrl)}" target="_blank" rel="noopener">see the trace →</a>`
+        : `<span class="t-trace none">no trace was collected</span>`;
+    }
+    attachTraceToTranscript(ev.session, ev.traceUrl);
     return;
   }
   if (ev.kind === "plant") {
@@ -542,9 +597,12 @@ function handleProbeEvent(ev) {
    * now it was the one turn that did not offer it. Absent when MLflow is not
    * configured, or when the exporter had not indexed it before the lookup
    * gave up — said plainly rather than shown as a dead link. */
-  const traceLine = ev.traceUrl
-    ? `<a class="t-trace" href="${esc(ev.traceUrl)}" target="_blank" rel="noopener">see the trace →</a>`
-    : "";
+  /* A slot rather than a value: the link is still being looked up. Says
+   * which of the two it is, so an absent link is never mistaken for a slow
+   * one. */
+  const traceLine = ev.tracePending
+    ? `<span class="t-tracewrap"><span class="t-trace waiting">looking for the trace…</span></span>`
+    : `<span class="t-tracewrap"><span class="t-trace none">no trace was collected</span></span>`;
 
   el.className = `toast ${o.cls}`;
   body.innerHTML = `

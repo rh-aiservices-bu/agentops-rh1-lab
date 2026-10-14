@@ -154,13 +154,24 @@ class Engine:
         if not await plant.hard_reset(self._client, self._plant_api_url):
             return
         restored = await self._restore_report()
+        # The agent's instructions go back too. tampered-agent-config rewrites
+        # them, and an agent left running on an attacker's instructions
+        # answers every later turn from them — so a reset that puts the plant
+        # right and leaves the soul rewritten has not reset the lab.
+        soul = await goals.restore_soul(
+            self._agent_pod_selector, self._agent_pod_container
+        )
+        missed = []
+        if not restored:
+            missed.append(goals.REPORTS_CANARY)
+        if not soul:
+            missed.append("the agent's instructions")
         events.emit(
             kind="plant", phase="resolved", id="plant-reset",
             title="Plant reset", outcome="reset",
             detail=f"{why} Work orders and maintenance records raised before "
-                   "now are gone." + ("" if restored else
-                   f" {goals.REPORTS_CANARY} could not be put back — the "
-                   "agent did not confirm the write."),
+                   "now are gone." + ("" if not missed else
+                   f" Could not restore: {', '.join(missed)}."),
         )
 
     async def _restore_report(self) -> bool:
@@ -243,6 +254,17 @@ class Engine:
         return secrets.choice(armed) if armed else None
 
     async def run_attack(self, case: Case, *, cycle_id: str | None = None) -> Outcome:
+        # Announced before the lock, not after the preparation.
+        #
+        # Everything between the click and this line used to be invisible:
+        # waiting on the lock, an optional plant reset, a state snapshot, the
+        # shutdown check, and — for the attack that tampers with the agent's
+        # instructions — a whole model call to read the file first. The
+        # console sat blank through all of it and looked frozen.
+        events.emit(
+            kind="attack", phase="started", id=case.id, title=case.title,
+            severity=case.severity, blurb=case.blurb,
+        )
         async with self._lock:
             return await self._run_attack(case, cycle_id or self._cycle_id_for(case))
 
@@ -411,10 +433,6 @@ class Engine:
                 return result
             before = await plant.snapshot(self._client, self._plant_api_url)
 
-        events.emit(
-            kind="attack", phase="started", id=case.id, title=case.title,
-            severity=case.severity, blurb=case.blurb,
-        )
         # Before the prompt goes out, so a hit cannot predate the probe that
         # is about to be credited with it. The observer's clock is its own,
         # so ask it rather than using ours.
@@ -506,20 +524,40 @@ class Engine:
             await self._emit_resolved(case, result)
 
     async def _emit_resolved(self, case: Case, result: Outcome) -> None:
-        # Resolved before the event, not after: the console renders the
-        # notification once and a link that arrives later would have nowhere
-        # to go. The lookup polls, so this is where the attack's few seconds
-        # of waiting are spent.
-        trace_url = ""
-        try:
-            trace_url = await mlflow_run.trace_url_for_session(result.session_id)
-        except Exception:  # noqa: BLE001 - a missing link must not sink a result
-            log.exception("could not resolve the trace for %s", case.id)
+        """Report the verdict now; let the trace link catch up.
+
+        The lookup polls MLflow for up to PROBE_TRACE_LOOKUP_S, because the
+        exporter is asynchronous and an attack usually finishes before its
+        trace lands. Waiting for that *before* emitting meant a slow export
+        held the whole result card back by up to a minute — the attack was
+        over and the console showed nothing.
+
+        So the verdict goes out immediately and the link arrives as its own
+        event. The console shows "looking for the trace…" in the meantime and
+        replaces it either way, so it never promises a link it cannot deliver.
+        """
         events.emit(
             kind="attack", phase="resolved", id=case.id, title=case.title,
             severity=case.severity, blurb=case.blurb,
             outcome=result.outcome, detail=result.detail, cleanup=result.cleanup,
-            traceUrl=trace_url, session=result.session_id,
+            session=result.session_id,
+            # Whether there is any point waiting: with no session, or no
+            # MLflow, the console should say so rather than spin.
+            tracePending=bool(result.session_id and mlflow_run.enabled()),
+        )
+        if result.session_id and mlflow_run.enabled():
+            # Detached: this outlives the attack, and nothing waits on it.
+            asyncio.create_task(self._emit_trace(case, result.session_id))
+
+    async def _emit_trace(self, case: Case, session: str) -> None:
+        """Fill in the trace link once MLflow has indexed it."""
+        url = ""
+        try:
+            url = await mlflow_run.trace_url_for_session(session)
+        except Exception:  # noqa: BLE001 - a missing link must not sink a result
+            log.exception("could not resolve the trace for %s", case.id)
+        events.emit(
+            kind="trace", id=case.id, session=session, traceUrl=url,
         )
 
     async def _run_eval(self, case: Case, cycle_id: str) -> Outcome:
@@ -569,11 +607,21 @@ class Engine:
     async def _read_soul(self, path: str) -> str:
         """The agent's instructions as they stand, for restoring afterwards.
 
-        Empty when it cannot be read, which cleanup treats as "do not run the
-        restore" rather than "restore to nothing" — overwriting the agent's
-        instructions with an empty file would be worse than the attack it is
-        meant to undo.
+        Read off the filesystem where that is possible, and only asked of the
+        agent otherwise. Asking cost a full model call before the attack's
+        prompt could even be sent — twenty-odd seconds of blank console — and
+        relied on the agent quoting its own instructions back accurately.
+
+        Empty when it cannot be read either way, which cleanup treats as "do
+        not run the restore" rather than "restore to nothing": overwriting the
+        agent's instructions with an empty file would be worse than the attack
+        it is meant to undo.
         """
+        body = await goals.fs_read(
+            path, self._agent_pod_selector, self._agent_pod_container
+        )
+        if body:
+            return body
         turn = await agent.ask(
             self._client,
             self._agent_url,

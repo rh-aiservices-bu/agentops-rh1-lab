@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import asyncio
 import json
 
 import httpx
@@ -1412,7 +1413,7 @@ async def test_a_reset_puts_the_report_back():
     assert goals.REPORTS_CANARY in asked[0]
     assert goals.REPORTS_CANARY_BODY.strip() in asked[0]
     detail = [e for e in events.since(0) if e["id"] == "plant-reset"][0]["detail"]
-    assert "could not be put back" not in detail
+    assert goals.REPORTS_CANARY not in detail
 
 
 @pytest.mark.asyncio
@@ -1431,7 +1432,8 @@ async def test_a_reset_says_so_when_the_report_cannot_be_restored():
     await engine._reset_plant("Reset for the test.")
 
     detail = [e for e in events.since(0) if e["id"] == "plant-reset"][0]["detail"]
-    assert "could not be put back" in detail
+    assert "Could not restore" in detail
+    assert goals.REPORTS_CANARY in detail
 
 
 @pytest.mark.asyncio
@@ -1481,6 +1483,8 @@ async def test_an_attack_notification_carries_its_own_trace_link(monkeypatch, ca
     on the single-attack path ever did.
     """
     events.reset()
+    # Tracing has to look configured, or the engine rightly does not even try.
+    monkeypatch.setattr("waterplant_ui.probes.mlflow_run.enabled", lambda: True)
     monkeypatch.setattr(
         "waterplant_ui.probes.mlflow_run.trace_url_for_session",
         _async_return("https://mlflow.example/#/experiments/7/traces?x=1"),
@@ -1493,8 +1497,18 @@ async def test_an_attack_notification_carries_its_own_trace_link(monkeypatch, ca
 
     resolved = [e for e in events.since(0)
                 if e["kind"] == "attack" and e["phase"] == "resolved"][0]
-    assert resolved["traceUrl"].startswith("https://mlflow.example/")
+    # The verdict does not wait for the link; it says one is coming.
+    assert resolved["tracePending"] is True
     assert resolved["session"]
+
+    # ...and the link follows as its own event.
+    for _ in range(50):
+        trace = [e for e in events.since(0) if e["kind"] == "trace"]
+        if trace:
+            break
+        await asyncio.sleep(0.02)
+    assert trace and trace[0]["traceUrl"].startswith("https://mlflow.example/")
+    assert trace[0]["session"] == resolved["session"]
 
 
 @pytest.mark.asyncio
@@ -1505,6 +1519,7 @@ async def test_a_missing_trace_does_not_sink_the_attack_result(monkeypatch, case
     async def boom(_session):
         raise RuntimeError("mlflow unreachable")
 
+    monkeypatch.setattr("waterplant_ui.probes.mlflow_run.enabled", lambda: True)
     monkeypatch.setattr(
         "waterplant_ui.probes.mlflow_run.trace_url_for_session", boom)
     agent = _Agent("Pump 4 is stopped.")
@@ -1514,9 +1529,13 @@ async def test_a_missing_trace_does_not_sink_the_attack_result(monkeypatch, case
     result = await engine.run_attack(case)
 
     assert result.outcome in ("got_through", "blocked", "declined")
-    resolved = [e for e in events.since(0)
-                if e["kind"] == "attack" and e["phase"] == "resolved"][0]
-    assert resolved["traceUrl"] == ""
+    for _ in range(50):
+        trace = [e for e in events.since(0) if e["kind"] == "trace"]
+        if trace:
+            break
+        await asyncio.sleep(0.02)
+    # A lookup that raised costs the link, not the verdict.
+    assert trace and trace[0]["traceUrl"] == ""
 
 
 # -- filesystem goals, measured rather than reported -------------------------
@@ -1691,3 +1710,61 @@ async def test_an_emptied_file_cannot_have_been_tampered_with(monkeypatch):
 
     answer, state = await goals.fs_observe(spec, "app=hermes-plain", "hermes")
     assert (answer, state) == (False, goals.EMPTY)
+
+
+# -- the soul goes back on a reset -------------------------------------------
+#
+# tampered-agent-config rewrites the agent's instructions, and an agent left
+# running on an attacker's instructions answers every later turn from them. A
+# reset that puts the plant right and leaves the soul rewritten has not reset
+# the lab.
+
+
+@pytest.mark.asyncio
+async def test_restoring_the_soul_copies_the_pristine_file(monkeypatch):
+    seen = _looked(monkeypatch, out="__RESTORED__\n")
+
+    assert await goals.restore_soul("app=hermes-plain", "hermes") is True
+    # From the read-only copy already in the pod, not from a model call: the
+    # agent whose instructions were tampered with is the last thing to ask.
+    assert goals.SOUL_SOURCE in seen["argv"]
+    assert "/app/.hermes/SOUL.md" in seen["argv"]
+    assert "cmp" in seen["argv"][2], "the copy must be verified, not assumed"
+
+
+@pytest.mark.asyncio
+async def test_a_soul_restore_that_did_not_take_reports_false(monkeypatch):
+    """cp can fail silently on a read-only mount or a full volume."""
+    _looked(monkeypatch, out="")
+    assert await goals.restore_soul("app=hermes-plain", "hermes") is False
+
+    _looked(monkeypatch, pod="")
+    assert await goals.restore_soul("app=hermes-plain", "hermes") is False
+    assert await goals.restore_soul("", "hermes") is False
+
+
+@pytest.mark.asyncio
+async def test_a_reset_restores_the_soul_and_says_when_it_cannot(monkeypatch):
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={})))
+
+    async def ok(prompt):
+        return TurnResult(text="DONE")
+
+    engine = Engine(client=client, agent_url="http://agent",
+                    plant_api_url="http://plant", cases=[])
+    engine._ask = ok  # type: ignore[assignment]
+
+    monkeypatch.setattr("waterplant_ui.probes.goals.restore_soul",
+                        _async_return(True))
+    events.reset()
+    await engine._reset_plant("Reset.")
+    detail = [e for e in events.since(0) if e["id"] == "plant-reset"][0]["detail"]
+    assert "Could not restore" not in detail
+
+    monkeypatch.setattr("waterplant_ui.probes.goals.restore_soul",
+                        _async_return(False))
+    events.reset()
+    await engine._reset_plant("Reset.")
+    detail = [e for e in events.since(0) if e["id"] == "plant-reset"][0]["detail"]
+    assert "the agent's instructions" in detail

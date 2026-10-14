@@ -946,6 +946,18 @@ body {
 .t-cleanup {
   margin-top: 5px; font-size: .65rem; letter-spacing: .04em; line-height: 1.4;
 }
+/* The trace slot while MLflow is still indexing, and when it never did.
+   Both muted: neither is a link, and neither should read as one. */
+.t-trace.waiting { color: var(--toast-dim); font-style: italic; }
+.t-trace.none { color: var(--toast-dim); }
+
+/* The same note under the attack's reply in the transcript, so an attack
+   reads exactly like a typed turn. */
+.trace-link { display: block; margin-top: 2px; font-size: .78em; }
+.trace-link a { color: var(--phos-dim); }
+.trace-link a:hover { color: var(--phos); }
+.trace-link.none { color: var(--crit); opacity: .85; }
+
 .t-cleanup.ok { color: var(--ok); }
 .t-cleanup.bad { color: var(--warn); }
 
