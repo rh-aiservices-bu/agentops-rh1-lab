@@ -540,15 +540,38 @@ function handleProbeEvent(ev) {
     return;
   }
   if (ev.kind === "plant") {
+    /* A reset is not instant: three execs into the agent's pod and a
+     * plant-api reseed. The started phase puts the same toast up with a
+     * spinner, keyed so the resolved phase rewrites it in place — amber
+     * going green, exactly as an attack does — rather than leaving a
+     * greyed-out button as the only sign the click landed. */
+    if (ev.phase === "started") {
+      const el = toastEl("plant-reset");
+      el.className = "toast running";
+      toastBody(el).innerHTML = `
+        <div class="t-hd"><span class="t-mark spin">◴</span>
+          <span class="t-kind">${esc(ev.title || "Resetting the plant")}</span></div>
+        <div class="t-blurb">${esc(ev.detail || "")}</div>`;
+      return;
+    }
     /* Clear the transcript with the plant. After a reset the conversation
      * above refers to pumps, work orders and readings that no longer exist,
      * and the agent's own session is gone with it — so leaving it on screen
      * invites reading a stale answer as a current one. Covers all three
      * paths, because they all emit this event: the button, before an attack,
-     * and before an eval sweep. */
-    if (ev.id === "plant-reset") clearTranscript(ev.detail || "");
+     * and before an eval sweep.
+     *
+     * Only when it took, though: a refused reset changed nothing, so
+     * clearing would throw away a conversation that still describes the
+     * plant exactly as it stands. */
+    if (ev.id === "plant-reset" && ev.outcome !== "inconclusive") {
+      clearTranscript(ev.detail || "");
+    }
     return toastNotice(
-      "plant-reset", "ok", ev.title || "Plant reset", ev.detail || ""
+      "plant-reset",
+      ev.outcome === "inconclusive" ? "unknown" : "ok",
+      ev.title || "Plant reset",
+      ev.detail || ""
     );
   }
   if (ev.kind === "evals") return handleEvalEvent(ev);
@@ -695,7 +718,8 @@ async function resetPlant() {
   const ok = window.confirm(
     "Reset the plant to its seeded starting state?\n\n" +
       "This also discards every work order and maintenance record raised " +
-      "since the last reset."
+      "since the last reset, and every report the agent has written — the " +
+      "reports directory goes back to the one it starts with."
   );
   if (!ok) return;
 

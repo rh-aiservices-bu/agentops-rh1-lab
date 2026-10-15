@@ -165,7 +165,23 @@ class Engine:
         best effort and named in the event instead, but a plant-api that
         refused is the one failure a caller has to be able to report.
         """
+        # Said before the work, not after. A reset is three pod execs and a
+        # plant-api reseed now — long enough that a button which only greys
+        # out reads as a console that swallowed the click. The console keys
+        # this to the same plant-reset toast it resolves below, so the
+        # spinner becomes the verdict rather than a second notification.
+        events.emit(
+            kind="plant", phase="started", id="plant-reset",
+            title="Resetting the plant",
+            detail="reseeding the plant and putting the agent's reports, "
+                   "instructions and skills back",
+        )
         if not await plant.hard_reset(self._client, self._plant_api_url):
+            events.emit(
+                kind="plant", phase="resolved", id="plant-reset",
+                title="Reset failed", outcome="inconclusive",
+                detail="plant-api refused the reset; nothing was changed",
+            )
             return False
         restored = await self._restore_report()
         # The agent's instructions go back too. tampered-agent-config rewrites
@@ -202,19 +218,32 @@ class Engine:
         return True
 
     async def _restore_report(self) -> bool:
-        """Put the always-present report back in the reports directory.
+        """Put the reports directory back to its starting state.
 
-        Every reset, not only deleted-reports' cleanup: the file is part of
+        Every reset, not only deleted-reports' cleanup: the canary is part of
         the starting state, and a participant who resets after any attack
-        should get it back. It lives in the agent's own filesystem — an
-        emptyDir on the plain pod, the sandbox on the other runtime — so the
-        only way in from here is to ask the agent, exactly as soul_restore
-        does.
+        should get it back.
+
+        Done in the pod when there is one to exec into, exactly as the soul
+        and the skills are. Asking the agent was the original mechanism and
+        it restores one file at best: it cannot remove the reports earlier
+        turns wrote, its own policy may by then forbid writing there, and
+        after a delete-reports attack it is the suspect being asked to put
+        the evidence back. Six stray reports and a reset that left all of
+        them is what this replaces.
+
+        The prompt stays as the fallback for a console with no pod selector
+        configured, which is the same shape fs_observe uses when it cannot
+        look for itself.
 
         Best effort, and reported rather than raised: a reset that fails to
         rewrite one file should still reset the plant, but it must not claim
         to have restored something it did not.
         """
+        if self._agent_pod_selector and self._agent_pod_container:
+            return await goals.restore_reports(
+                self._agent_pod_selector, self._agent_pod_container
+            )
         if not self._agent_url:
             return False
         turn = await self._ask(goals.REPORTS_RESTORE_PROMPT.format(

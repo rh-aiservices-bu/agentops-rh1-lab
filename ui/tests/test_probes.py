@@ -1384,7 +1384,9 @@ async def test_a_reset_still_tells_the_console_to_clear():
 
     assert "/reset" in hits
     resets = [e for e in events.since(0) if e.get("id") == "plant-reset"]
-    assert resets and "work orders" in resets[0]["detail"].lower()
+    # The verdict, not the "it has begun" event that now precedes it.
+    done = [e for e in resets if e.get("phase") == "resolved"]
+    assert done and "work orders" in done[0]["detail"].lower()
 
 
 @pytest.mark.asyncio
@@ -1413,7 +1415,8 @@ async def test_a_reset_puts_the_report_back():
     assert len(asked) == 1
     assert goals.REPORTS_CANARY in asked[0]
     assert goals.REPORTS_CANARY_BODY.strip() in asked[0]
-    detail = [e for e in events.since(0) if e["id"] == "plant-reset"][0]["detail"]
+    detail = [e for e in events.since(0)
+              if e["id"] == "plant-reset" and e["phase"] == "resolved"][0]["detail"]
     assert goals.REPORTS_CANARY not in detail
 
 
@@ -1432,7 +1435,8 @@ async def test_a_reset_says_so_when_the_report_cannot_be_restored():
     events.reset()
     await engine._reset_plant("Reset for the test.")
 
-    detail = [e for e in events.since(0) if e["id"] == "plant-reset"][0]["detail"]
+    detail = [e for e in events.since(0)
+              if e["id"] == "plant-reset" and e["phase"] == "resolved"][0]["detail"]
     assert "Could not restore" in detail
     assert goals.REPORTS_CANARY in detail
 
@@ -1749,6 +1753,65 @@ async def test_a_soul_restore_that_did_not_take_reports_false(monkeypatch):
     assert await goals.restore_soul("", "hermes") is False
 
 
+# -- the reports directory goes back to one file ------------------------------
+#
+# Asking the agent to rewrite the canary restored one file at best. It cannot
+# remove the reports its earlier turns wrote, its own policy may by then
+# forbid writing there, and after a delete-reports attack it is the suspect
+# being asked to put the evidence back. Observed on cluster-slkjc: six stray
+# reports and a reset that left every one of them.
+
+
+@pytest.mark.asyncio
+async def test_restoring_the_reports_clears_the_directory_first(monkeypatch):
+    seen = _looked(monkeypatch, out="__RESTORED__\n")
+
+    assert await goals.restore_reports("app=hermes-plain", "hermes") is True
+    assert goals.REPORT_SOURCE in seen["argv"]
+    assert goals.REPORTS_DIR in seen["argv"]
+    assert goals.REPORTS_CANARY in seen["argv"]
+    script = seen["argv"][2]
+    assert "rm -rf" in script, "the strays have to go, not just the canary back"
+    assert "cp " in script and "cat" in script, "the restore must be read back"
+    # Pure shell: a missing find/ls/cmp exits 127, which looks like a refusal.
+    for binary in ("find ", "ls ", "cmp "):
+        assert binary not in script, f"{binary.strip()} is not in both images"
+
+
+@pytest.mark.asyncio
+async def test_a_reports_restore_that_left_a_stray_reports_false(monkeypatch):
+    """The verification covers both halves, so a leftover file is a failure."""
+    _looked(monkeypatch, out="")
+    assert await goals.restore_reports("app=hermes-plain", "hermes") is False
+
+    _looked(monkeypatch, pod="")
+    assert await goals.restore_reports("app=hermes-plain", "hermes") is False
+    assert await goals.restore_reports("", "hermes") is False
+
+
+@pytest.mark.asyncio
+async def test_the_reports_go_back_in_the_pod_not_by_asking_the_agent(monkeypatch):
+    """With a pod to exec into, the agent is never asked."""
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={})))
+    asked = []
+
+    async def ask(prompt):
+        asked.append(prompt)
+        return TurnResult(text="DONE")
+
+    engine = Engine(client=client, agent_url="http://agent",
+                    plant_api_url="http://plant", cases=[],
+                    agent_pod_selector="app=hermes-plain",
+                    agent_pod_container="hermes")
+    engine._ask = ask  # type: ignore[assignment]
+    monkeypatch.setattr("waterplant_ui.probes.goals.restore_reports",
+                        _async_return(True))
+
+    assert await engine._restore_report() is True
+    assert not asked, "the suspect was asked to put the evidence back"
+
+
 # -- and so do the skills ----------------------------------------------------
 #
 # A patched SKILL.md is the longer-lived half of a tampered soul. Hermes
@@ -1806,15 +1869,60 @@ async def test_a_reset_restores_the_skills_and_says_when_it_cannot(monkeypatch):
                         _async_return(True))
     events.reset()
     assert await engine.reset_everything("Reset.") is True
-    detail = [e for e in events.since(0) if e["id"] == "plant-reset"][0]["detail"]
+    detail = [e for e in events.since(0)
+              if e["id"] == "plant-reset" and e["phase"] == "resolved"][0]["detail"]
     assert "Could not restore" not in detail
 
     monkeypatch.setattr("waterplant_ui.probes.goals.restore_skills",
                         _async_return(False))
     events.reset()
     await engine.reset_everything("Reset.")
-    detail = [e for e in events.since(0) if e["id"] == "plant-reset"][0]["detail"]
+    detail = [e for e in events.since(0)
+              if e["id"] == "plant-reset" and e["phase"] == "resolved"][0]["detail"]
     assert "the agent's skills" in detail
+
+
+@pytest.mark.asyncio
+async def test_a_reset_says_it_has_begun_before_doing_the_work(monkeypatch):
+    """Three pod execs and a reseed is long enough to need a spinner.
+
+    Keyed to the same plant-reset id the verdict uses, so the console rewrites
+    one toast rather than stacking two.
+    """
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={})))
+
+    engine = Engine(client=client, agent_url="http://agent",
+                    plant_api_url="http://plant", cases=[])
+    engine._ask = _async_return(TurnResult(text="DONE"))  # type: ignore[assignment]
+    for name in ("restore_soul", "restore_skills", "restore_reports"):
+        monkeypatch.setattr(f"waterplant_ui.probes.goals.{name}",
+                            _async_return(True))
+
+    events.reset()
+    await engine.reset_everything("Reset.")
+    plant_events = [e for e in events.since(0) if e["id"] == "plant-reset"]
+
+    assert [e["phase"] for e in plant_events] == ["started", "resolved"]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_reset_resolves_rather_than_spinning_forever(monkeypatch):
+    """plant-api said no. The spinner has to come down, and say so."""
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(500, json={})))
+
+    engine = Engine(client=client, agent_url="http://agent",
+                    plant_api_url="http://plant", cases=[])
+    events.reset()
+
+    assert await engine.reset_everything("Reset.") is False
+    phases = [e["phase"] for e in events.since(0) if e["id"] == "plant-reset"]
+    assert phases == ["started", "resolved"]
+    last = [e for e in events.since(0) if e["id"] == "plant-reset"][-1]
+    # inconclusive, not ok: the console keys the transcript clear off this,
+    # and a reset that changed nothing must not throw the conversation away.
+    assert last["outcome"] == "inconclusive"
 
 
 @pytest.mark.asyncio
@@ -1836,14 +1944,16 @@ async def test_a_reset_restores_the_soul_and_says_when_it_cannot(monkeypatch):
                         _async_return(True))
     events.reset()
     await engine._reset_plant("Reset.")
-    detail = [e for e in events.since(0) if e["id"] == "plant-reset"][0]["detail"]
+    detail = [e for e in events.since(0)
+              if e["id"] == "plant-reset" and e["phase"] == "resolved"][0]["detail"]
     assert "Could not restore" not in detail
 
     monkeypatch.setattr("waterplant_ui.probes.goals.restore_soul",
                         _async_return(False))
     events.reset()
     await engine._reset_plant("Reset.")
-    detail = [e for e in events.since(0) if e["id"] == "plant-reset"][0]["detail"]
+    detail = [e for e in events.since(0)
+              if e["id"] == "plant-reset" and e["phase"] == "resolved"][0]["detail"]
     assert "the agent's instructions" in detail
 
 
