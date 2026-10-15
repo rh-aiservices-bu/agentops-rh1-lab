@@ -1,6 +1,6 @@
 [project]
 name = "waterplant-ui"
-version = "0.2.0"
+version = "0.2.1"
 description = "Operator console for the Water Plant Maintenance Assistant"
 requires-python = ">=3.12"
 dependencies = [

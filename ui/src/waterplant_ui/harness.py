@@ -224,7 +224,9 @@ def translate_reply(body: dict) -> dict:
     }
 
 
-def _sse(event: dict) -> bytes:
+def sse(event: dict) -> bytes:
+    """One console SSE frame. Public because `app.py` and `guardrails.py`
+    emit frames of their own — a blocked prompt never reaches this module."""
     return f"data: {json.dumps(event)}\n\n".encode()
 
 
@@ -249,19 +251,19 @@ async def relay_stream(
                 async for chunk in up.aiter_raw():
                     yield chunk
         except httpx.HTTPError as exc:
-            yield _sse({"type": "error", "detail": f"agent unreachable: {exc}"})
+            yield sse({"type": "error", "detail": f"agent unreachable: {exc}"})
         return
 
     # Before the request, not after the answer: the trace is stamped with when
     # the turn began, and a window opened afterwards can miss its own trace.
     started_ms = int(time.time() * 1000)
     if opening := _no_trace_event():
-        yield _sse(opening)
+        yield sse(opening)
     try:
         async with client.stream("POST", target, json=body, headers=headers) as up:
             if up.status_code >= 400:
                 detail = (await up.aread()).decode(errors="replace")[:400]
-                yield _sse(
+                yield sse(
                     {"type": "error", "detail": f"agent returned HTTP {up.status_code}: {detail}"}
                 )
                 return
@@ -274,12 +276,12 @@ async def relay_stream(
                 try:
                     reply = json.loads(raw)["choices"][0]["message"]["content"] or ""
                 except (ValueError, KeyError, IndexError, TypeError):
-                    yield _sse({"type": "error", "detail": f"unparseable reply: {raw[:400]}"})
+                    yield sse({"type": "error", "detail": f"unparseable reply: {raw[:400]}"})
                     return
-                yield _sse({"type": "token", "text": reply})
+                yield sse({"type": "token", "text": reply})
                 if link := await _trace_link_event(message, started_ms):
-                    yield _sse(link)
-                yield _sse({"type": "done", "steps": 0, "rateLimitRetries": 0})
+                    yield sse(link)
+                yield sse({"type": "done", "steps": 0, "rateLimitRetries": 0})
                 return
 
             async for line in up.aiter_lines():
@@ -298,7 +300,7 @@ async def relay_stream(
                 except (KeyError, IndexError, TypeError):
                     continue
                 if text := delta.get("content"):
-                    yield _sse({"type": "token", "text": text})
+                    yield sse({"type": "token", "text": text})
                 # Not expected from Hermes, which loops server-side — but a
                 # different OpenAI-compatible harness may forward them, and if
                 # one does the trace panel should light up for free.
@@ -310,7 +312,7 @@ async def relay_stream(
                         args = json.loads(fn.get("arguments") or "{}")
                     except ValueError:
                         args = {}
-                    yield _sse(
+                    yield sse(
                         {
                             "type": "tool_call",
                             "name": fn["name"],
@@ -319,9 +321,9 @@ async def relay_stream(
                         }
                     )
     except httpx.HTTPError as exc:
-        yield _sse({"type": "error", "detail": f"agent unreachable: {exc}"})
+        yield sse({"type": "error", "detail": f"agent unreachable: {exc}"})
         return
 
     if link := await _trace_link_event(message, started_ms):
-        yield _sse(link)
-    yield _sse({"type": "done", "steps": 0, "rateLimitRetries": 0})
+        yield sse(link)
+    yield sse({"type": "done", "steps": 0, "rateLimitRetries": 0})

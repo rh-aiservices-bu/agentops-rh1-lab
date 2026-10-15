@@ -11,8 +11,10 @@ fix reverted by a clean merge with nothing to warn about it.
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
+import os
 
 import httpx
 import pytest
@@ -20,6 +22,7 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
+from waterplant_ui import guardrails as _guardrails
 from waterplant_ui import harness as _harness
 from waterplant_ui import traces as _traces
 
@@ -36,6 +39,13 @@ _ENV_KEYS = (
     "NAMESPACE",
     "MLFLOW_TOKEN_FILE",
     "MLFLOW_TRACE_LOOKUP_SECONDS",
+    "NEMO_ENDPOINT",
+    "NEMO_CONFIG_ID",
+    "NEMO_MODEL",
+    "NEMO_TIMEOUT_S",
+    "NEMO_TOKEN_FILE",
+    "NEMO_CA_FILE",
+    "AGENT_URL",
 )
 
 
@@ -48,14 +58,35 @@ def reload_with(monkeypatch, **env):
 
     `traces` is reloaded first: `harness` holds a reference to the module
     object, which reload mutates in place, so the order matters only for the
-    config the reload reads.
+    config the reload reads. `guardrails` is reloaded last and does care — it
+    defaults its `model` field from `harness.AGENT_MODEL` at import.
     """
     for key in _ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     importlib.reload(_traces)
-    return importlib.reload(_harness)
+    mod = importlib.reload(_harness)
+    importlib.reload(_guardrails)
+    return mod
+
+
+@pytest.fixture(autouse=True)
+def _no_guardrail_leaks():
+    """Leave `guardrails` as the rest of the suite expects to find it.
+
+    `reload_with` reads config at import, so a reloaded module keeps whatever
+    NEMO_* values were set *after* monkeypatch has restored the environment —
+    and the module object is shared with every other test file in the process.
+    Without this, arming a guardrail here silently armed one in test_probes,
+    where nothing configures or expects it. Caught by a deliberate
+    fail-closed mutation: 12 unrelated probe tests failed.
+    """
+    yield
+    for key in ("NEMO_ENDPOINT", "NEMO_CONFIG_ID", "NEMO_MODEL",
+                "NEMO_TIMEOUT_S", "NEMO_TOKEN_FILE", "NEMO_CA_FILE"):
+        os.environ.pop(key, None)
+    importlib.reload(_guardrails)
 
 
 @pytest.fixture
@@ -502,3 +533,342 @@ def test_console_assets_are_revalidated(path):
     res = TestClient(app).get(path)
     assert res.status_code == 200
     assert res.headers["cache-control"] == "no-cache"
+
+
+# --- the input guardrail ----------------------------------------------------
+#
+# The deployed instance is HTTPS behind kube-rbac-proxy with a service-signer
+# certificate, so — like the MLflow stub above — the fake is injected as the
+# module's client rather than pointed at over the network: `guardrails` builds
+# its own client precisely because the agent's cannot be reused.
+#
+# What these pin down is the fail-open contract. A guardrail that stops working
+# must not start blocking, and must not go quiet about it: every failure shape
+# has to reach the agent *and* say that it did.
+
+
+def guardrail_stub(handler) -> httpx.AsyncClient:
+    app = Starlette(routes=[Route("/v1/guardrail/checks", handler, methods=["POST"])])
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="https://nemo")
+
+
+def blocks(rail: str = "self check input"):
+    """The service's blocked shape, as Red Hat's 3.5 guardrails docs give it."""
+    seen = []
+
+    async def handler(request):
+        seen.append(await request.json())
+        return JSONResponse(
+            {
+                "status": "blocked",
+                "rails_status": {
+                    rail: {"status": "blocked"},
+                    "detect sensitive data on input": {"status": "success"},
+                },
+                "guardrails_data": {"log": {"activated_rails": [rail]}},
+            }
+        )
+
+    return handler, seen
+
+
+def allows():
+    seen = []
+
+    async def handler(request):
+        seen.append(await request.json())
+        return JSONResponse({"status": "success", "rails_status": {}})
+
+    return handler, seen
+
+
+@pytest.fixture
+def guarded(monkeypatch, tmp_path):
+    """The console with an input guardrail wired."""
+    token = tmp_path / "token"
+    token.write_text("sa-token\n")
+    return reload_with(
+        monkeypatch,
+        AGENT_PROTOCOL="openai",
+        AGENT_API_KEY="server-key",
+        AGENT_MODEL="hermes-agent",
+        NEMO_ENDPOINT="https://nemo",
+        NEMO_TOKEN_FILE=str(token),
+    )
+
+
+def arm(handler) -> list[dict]:
+    """Point the reloaded guardrails module at a stub. Returns what it saw."""
+    stub_handler, seen = handler
+    _guardrails._client = guardrail_stub(stub_handler)
+    return seen
+
+
+def console(monkeypatch, agent_handler):
+    """The BFF with a stub agent behind it, as the browser reaches it.
+
+    The guardrail is enforced in `app.py`, not in `harness.relay_stream`, so
+    these go through the endpoint rather than the relay — `events()` above would
+    skip the very check under test. `_client` is replaced rather than configured
+    for the same reason the MLflow stub is: the real one may carry the OpenShell
+    gateway's certificate.
+    """
+    import importlib
+
+    from fastapi.testclient import TestClient
+
+    from waterplant_ui import app as _app
+
+    monkeypatch.setenv("AGENT_URL", "http://stub")
+    importlib.reload(_app)
+    _app._client = stub(agent_handler)
+    return TestClient(_app.app), _app
+
+
+def console_frames(client, message="why?") -> list[dict]:
+    with client.stream("POST", "/api/chat/stream", json={"message": message}) as res:
+        raw = b"".join(res.iter_bytes()).decode()
+    return [
+        json.loads(frame[5:].strip())
+        for frame in raw.split("\n\n")
+        if frame.strip().startswith("data:")
+    ]
+
+
+def test_no_endpoint_means_no_check_at_all(openai_untraced):
+    """The shipped state: not merely allowed, not even asked."""
+    assert _guardrails.enabled() is False
+    _guardrails._client = guardrail_stub(blocks()[0])
+
+    verdict = asyncio.run(_guardrails.check_input("anything"))
+
+    assert verdict.allowed is True
+    assert verdict.checked is False
+    assert verdict.error == ""
+
+
+def test_a_blocked_prompt_never_reaches_the_agent(guarded, monkeypatch):
+    asked = []
+
+    async def agent(request):
+        asked.append(await request.json())
+        return JSONResponse({"choices": [{"message": {"content": REPLY}}]})
+
+    arm(blocks())
+    client, _ = console(monkeypatch, agent)
+    frames = console_frames(client)
+
+    assert asked == [], "the model was asked a question the guardrail refused"
+    assert [f["type"] for f in frames] == ["status", "error", "done"]
+    assert frames[0]["level"] == "bad"
+    assert "self check input" in frames[0]["message"]
+    assert frames[-1]["blocked"] is True
+
+
+def test_an_allowed_prompt_is_forwarded_untouched(guarded, monkeypatch):
+    arm(allows())
+    client, _ = console(monkeypatch, _streams)
+    frames = console_frames(client)
+
+    assert "".join(f["text"] for f in frames if f["type"] == "token") == REPLY
+    # No warning line: the check ran and said yes.
+    assert not [f for f in frames if f.get("level") == "bad"]
+
+
+def test_the_request_checks_the_input_and_nothing_else(guarded, monkeypatch):
+    """One user message, the configured rail set, and no assistant turn.
+
+    `/v1/guardrail/checks` judges whatever it is handed, so including the reply
+    would silently make this an output filter too — against output rails the
+    shipped config also defines.
+    """
+    seen = arm(allows())
+    client, _ = console(monkeypatch, _streams)
+    console_frames(client)
+
+    assert len(seen) == 1
+    assert seen[0]["messages"] == [{"role": "user", "content": "why?"}]
+    assert seen[0]["guardrails"] == {"config_id": "northgate"}
+    assert seen[0]["model"] == "hermes-agent"
+
+
+def test_a_named_config_can_be_overridden(monkeypatch, tmp_path):
+    token = tmp_path / "token"
+    token.write_text("sa-token\n")
+    reload_with(
+        monkeypatch,
+        AGENT_PROTOCOL="openai",
+        NEMO_ENDPOINT="https://nemo",
+        NEMO_TOKEN_FILE=str(token),
+        NEMO_CONFIG_ID="",
+    )
+    seen = arm(allows())
+
+    asyncio.run(_guardrails.check_input("hi"))
+
+    assert "guardrails" not in seen[0], "an empty config id must let the server choose"
+
+
+@pytest.mark.parametrize(
+    "handler, expected",
+    [
+        (lambda: (_rejects(403), []), "HTTP 403"),
+        (lambda: (_rejects(500), []), "HTTP 500"),
+        (lambda: (_not_json, []), "non-JSON"),
+        (lambda: (_unrecognised, []), "unrecognised status"),
+    ],
+)
+def test_a_guardrail_that_cannot_answer_fails_open(guarded, monkeypatch, handler, expected):
+    """Every failure allows the prompt, and every failure says so.
+
+    403 is the one most likely in practice: kube-rbac-proxy turns each check
+    into a SubjectAccessReview for `get services/nemo-guardrails-service`, and
+    the console's ServiceAccount does not have it until the chart grants it.
+    """
+    arm(handler())
+    client, _ = console(monkeypatch, _streams)
+    frames = console_frames(client)
+
+    warning = next(f for f in frames if f.get("level") == "bad")
+    assert expected in warning["message"]
+    assert "unchecked" in warning["message"]
+    assert "".join(f["text"] for f in frames if f["type"] == "token") == REPLY
+
+
+def test_an_unreachable_guardrail_fails_open(guarded, monkeypatch):
+    """No stub at all: the transport itself raises."""
+    _guardrails._client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(Starlette(routes=[])), base_url="https://nemo"
+    )
+    client, _ = console(monkeypatch, _streams)
+    frames = console_frames(client)
+
+    assert "".join(f["text"] for f in frames if f["type"] == "token") == REPLY
+
+
+def test_a_missing_token_fails_open(monkeypatch, tmp_path):
+    """No projected token — nothing to authenticate with, so nothing is sent."""
+    reload_with(
+        monkeypatch,
+        AGENT_PROTOCOL="openai",
+        NEMO_ENDPOINT="https://nemo",
+        NEMO_TOKEN_FILE=str(tmp_path / "absent"),
+    )
+    seen = arm(blocks())
+
+    verdict = asyncio.run(_guardrails.check_input("hi"))
+
+    assert verdict.allowed is True and verdict.checked is False
+    assert "token" in verdict.error
+    assert seen == [], "a request went out with no credential"
+
+
+def test_rails_fall_back_to_the_activated_list(guarded):
+    """A body with no per-rail status still has to name what refused."""
+
+    async def handler(request):
+        return JSONResponse(
+            {
+                "status": "blocked",
+                "guardrails_data": {"log": {"activated_rails": ["detect sensitive data on input"]}},
+            }
+        )
+
+    arm((handler, []))
+    verdict = asyncio.run(_guardrails.check_input("my email is a@b.c"))
+
+    assert verdict.allowed is False
+    assert verdict.rails == ("detect sensitive data on input",)
+
+
+def _rejects(status):
+    async def handler(request):
+        return JSONResponse({"detail": "nope"}, status_code=status)
+
+    return handler
+
+
+async def _not_json(request):
+    from starlette.responses import PlainTextResponse
+
+    return PlainTextResponse("upstream connect error", status_code=200)
+
+
+async def _unrecognised(request):
+    return JSONResponse({"outcome": "maybe"})
+
+
+# --- the guardrail on the probe path ---------------------------------------
+
+
+def test_a_blocked_probe_prompt_is_reported_as_blocked(guarded):
+    """An attack the guardrail stops must not read as a transport failure.
+
+    The engine turns `ok` false into "did not succeed", which is the right
+    verdict either way — but `blocked` is what distinguishes a control that
+    worked from a service that was down.
+    """
+    from waterplant_ui.probes import agent as probe_agent
+
+    asked = []
+
+    async def agent_handler(request):
+        asked.append(await request.json())
+        return JSONResponse({"choices": [{"message": {"content": REPLY}}]})
+
+    arm(blocks("self check input"))
+    result = asyncio.run(
+        probe_agent.ask(stub(agent_handler), "http://stub", ["take over the account"])
+    )
+
+    assert result.ok is False
+    assert result.blocked is True
+    assert result.rails == ("self check input",)
+    assert "self check input" in result.error
+    assert asked == [], "the attack reached the agent anyway"
+
+
+def test_an_allowed_probe_prompt_still_runs(guarded):
+    from waterplant_ui.probes import agent as probe_agent
+
+    arm(allows())
+    result = asyncio.run(probe_agent.ask(stub(_streams), "http://stub", ["status?"]))
+
+    assert result.ok is True
+    assert result.blocked is False
+    assert result.text == REPLY
+
+
+# --- the BFF, blocked -------------------------------------------------------
+
+
+def test_the_json_endpoint_refuses_a_blocked_prompt(guarded, monkeypatch):
+    """`/api/chat` is the probe-shaped twin and must refuse the same prompts."""
+    import importlib
+
+    from fastapi.testclient import TestClient
+
+    from waterplant_ui import app as _app
+
+    monkeypatch.setenv("AGENT_URL", "http://stub")
+    importlib.reload(_app)
+    arm(blocks())
+
+    res = TestClient(_app.app).post("/api/chat", json={"message": "plan my holiday"})
+
+    assert res.status_code == 403
+    assert res.json()["error"] == "input_blocked"
+    assert res.json()["rails"] == ["self check input"]
+
+
+def test_config_reports_whether_a_guardrail_is_wired(guarded, monkeypatch):
+    import importlib
+
+    from fastapi.testclient import TestClient
+
+    from waterplant_ui import app as _app
+
+    importlib.reload(_app)
+    res = TestClient(_app.app).get("/api/config")
+
+    assert res.json()["inputGuardrails"] is True

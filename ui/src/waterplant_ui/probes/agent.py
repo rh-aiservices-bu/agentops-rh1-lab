@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from .. import harness
+from .. import guardrails, harness
 
 #: Called with ("user" | "assistant" | "system", text) as a conversation runs.
 TurnEcho = Callable[[str, str], Awaitable[None]]
@@ -38,6 +38,13 @@ class TurnResult:
     #: trace as `mlflow.trace.session`, which is what lets a result be matched
     #: to its trace exactly rather than by "the most recent one".
     session_id: str = ""
+    #: Stopped by the input guardrail rather than by a fault. Both leave `error`
+    #: set and `ok` false — which is the verdict an attack wants either way —
+    #: but only one of them means a control worked, and a reader of the detail
+    #: should never have to guess which.
+    blocked: bool = False
+    #: The rails that refused, when `blocked`.
+    rails: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -78,6 +85,21 @@ async def ask(
     for prompt in prompts:
         if on_turn:
             await on_turn("user", prompt)
+
+        # The same check the chat pane applies, for the same reason this module
+        # goes through `harness` at all: a probe must not reach anything the
+        # participant's own console cannot. An attack that bypassed the
+        # guardrail would report "got through" against a control that was never
+        # asked.
+        verdict = await guardrails.check_input(prompt)
+        if not verdict.allowed:
+            detail = f"blocked by NeMo Guardrails — {verdict.summary}"
+            if on_turn:
+                await on_turn("system", detail)
+            return TurnResult(
+                error=detail, blocked=True, rails=verdict.rails, session_id=session
+            )
+
         target, payload = harness.request(
             agent_url, prompt, persona, history, stream=False, session_id=session
         )

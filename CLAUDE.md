@@ -83,6 +83,43 @@ These are the project owner's rules, not suggestions.
   (`serviceaccounts/token`, `resourceNames` scoped to itself). The projected token
   rotates; the sandbox holds a static file, so a long-lived token is minted.
 
+### NeMo Guardrails
+
+- The console checks **input only**, in `ui/src/waterplant_ui/guardrails.py`,
+  called from `app.py`'s two chat endpoints and from `probes/agent.py:ask` —
+  which is every prompt entry point, probes included. Off unless
+  `NEMO_ENDPOINT` is set, which is the shipped state: the baseline has no
+  guardrail, and module 6 is where a participant sets the variable by hand.
+- **It is HTTPS on 443 behind `kube-rbac-proxy`, not plain HTTP on 8080**, and
+  the Service is `nemo-guardrails` (singular `nemo-guardrail` appears in older
+  notes and is wrong). `security.opendatahub.io/enable-auth` on the CR is what
+  puts the proxy there.
+- Authorization is a SelfSubjectAccessReview for `get` on `services` with
+  **`resourceName: nemo-guardrails-service`** — a name no Service actually
+  has. The proxy matches the string in its own `nemo-guardrails-rbac-proxy-config`,
+  and nothing reconciles it with the real object, so the console's Role must
+  use the proxy's string. Same class as the `mlflow.kubeflow.org` group above:
+  RBAC matches strings. Verified: without the Role the UI's SA gets
+  `Forbidden (verb=get, resource=services)`.
+- Both the token and the service-signer CA are already in the UI pod's
+  ServiceAccount projection (`token`, `service-ca.crt`), so this needs no
+  Secret, ConfigMap or extra volume.
+- **Only `{"status": "blocked"}` blocks.** Every other outcome — 403, timeout,
+  non-JSON, an unrecognised shape — fails *open* and is announced in the
+  transcript as a check that did not run. A guardrail that quietly stops
+  working must not look like one that refused.
+- `NEMO_ENDPOINT` is in the platform Application's `ignoreDifferences`
+  alongside `AGENT_URL`; that chart self-heals, so without the entry the hand
+  edit is reverted within a sync interval.
+- **The operator sets no memory limit on the server container** and the CR
+  exposes no knob for it, so it inherits the namespace LimitRange default of
+  512Mi and is **OOMKilled on its first check** (cluster-pz7xk: `exit=137`,
+  both on a local sensitive-data rail and an LLM-judged one). Raise the
+  LimitRange default before expecting any rail to answer.
+- `self check input` is an LLM call to `qwen3-235b-a22b` over the shared MaaS
+  endpoint, so a check is a model round trip that can 429 — hence the 20s
+  timeout, well under the agent's 300s.
+
 ### OpenShell
 
 - The sandbox policy is an allowlist with **no "allow everything"** — `*`, `**` and

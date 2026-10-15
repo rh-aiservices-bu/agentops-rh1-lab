@@ -18,6 +18,7 @@ import logging
 import os
 import ssl
 import uuid
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Literal
 
@@ -28,7 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import harness
+from . import guardrails, harness
 from .probes import engine as probe_engine
 from .probes import loader as probe_loader
 from .probes import events as probe_events
@@ -172,6 +173,10 @@ async def config() -> dict[str, Any]:
         "agentHarness": harness.PROTOCOL,
         "agentTraceAvailable": harness.PROTOCOL == "waterplant",
         "identityPropagated": harness.identity_is_propagated(),
+        # Whether a prompt is checked before the agent is asked. Reported for
+        # the same reason as the two above: a participant looking for the
+        # guardrail must be able to see that none is wired yet.
+        "inputGuardrails": guardrails.enabled(),
     }
 
 
@@ -450,6 +455,20 @@ async def chat(req: ChatRequest, request: Request) -> JSONResponse:
             status_code=503,
         )
 
+    verdict = await guardrails.check_input(req.message)
+    if not verdict.allowed:
+        return JSONResponse(
+            {
+                "error": "input_blocked",
+                "detail": (
+                    "Blocked by the input guardrail before the agent saw it. "
+                    f"Rails that refused: {verdict.summary}."
+                ),
+                "rails": list(verdict.rails),
+            },
+            status_code=403,
+        )
+
     target, payload = harness.request(
         AGENT_URL, req.message, req.persona, _history(req), stream=False, session_id=_session(req)
     )
@@ -502,6 +521,31 @@ class _RevalidatingStatic(StaticFiles):
 app.mount("/static", _RevalidatingStatic(directory=STATIC), name="static")
 
 
+#: Unbuffered, uncached: an SSE stream that a proxy batches arrives as one
+#: block at the end, which reads as a hang.
+_SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+
+
+async def _frames(events: list[dict]) -> AsyncIterator[bytes]:
+    """A complete, self-contained stream — used when the agent is never called."""
+    for event in events:
+        yield harness.sse(event)
+
+
+async def _prefixed(
+    events: list[dict], stream: AsyncIterator[bytes]
+) -> AsyncIterator[bytes]:
+    """`events`, then the agent's own stream.
+
+    Lets a warning about the guardrail land before the answer it could not
+    vouch for, without `harness.relay_stream` having to know a guardrail exists.
+    """
+    for event in events:
+        yield harness.sse(event)
+    async for chunk in stream:
+        yield chunk
+
+
 @app.post("/api/chat/stream")
 async def chat_stream(req: ChatRequest, request: Request):
     """Proxy the agent's SSE stream to the browser, unbuffered.
@@ -521,16 +565,30 @@ async def chat_stream(req: ChatRequest, request: Request):
             status_code=503,
         )
 
+    # Before the agent, never alongside it: a prompt the guardrail refuses must
+    # not reach the model at all, which is the whole difference between an input
+    # rail and an apology after the fact.
+    verdict = await guardrails.check_input(req.message)
+    if not verdict.allowed:
+        return StreamingResponse(
+            _frames(guardrails.blocked_events(verdict)),
+            media_type="text/event-stream",
+            headers=_SSE_HEADERS,
+        )
+
     return StreamingResponse(
-        harness.relay_stream(
-            client(),
-            AGENT_URL,
-            req.message,
-            req.persona,
-            _history(req),
-            request.headers.get("authorization"),
-            _session(req),
+        _prefixed(
+            guardrails.notice_events(verdict),
+            harness.relay_stream(
+                client(),
+                AGENT_URL,
+                req.message,
+                req.persona,
+                _history(req),
+                request.headers.get("authorization"),
+                _session(req),
+            ),
         ),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers=_SSE_HEADERS,
     )

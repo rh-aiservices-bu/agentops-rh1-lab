@@ -943,6 +943,20 @@ function remember(role, content) {
   if (history.length > MAX_HISTORY_TURNS) history.splice(0, history.length - MAX_HISTORY_TURNS);
 }
 
+/* Unsay the last turn.
+ *
+ * A prompt the input guardrail refused never reached the agent, so leaving it
+ * in history would replay a question nobody was asked -- and on the native
+ * protocol would hand the blocked text to the agent on the next turn after
+ * all. Matched on content rather than popped blindly: a probe's turn may have
+ * landed in between.
+ */
+function forget(role, content) {
+  const text = (content || "").trim();
+  const last = history[history.length - 1];
+  if (last && last.role === role && last.content === text) history.pop();
+}
+
 /* Streamed request.
  *
  * Tool calls are rendered the moment they fire rather than summarised at the
@@ -969,6 +983,7 @@ async function ask(event) {
   const chat = $("chat");
   let replyLine = null;
   let replyText = "";
+  let blocked = false;
 
   const write = (text) => {
     stopPending();
@@ -1076,6 +1091,7 @@ async function ask(event) {
         } else if (ev.type === "error") {
           addMessage("system", ev.detail);
         } else if (ev.type === "done") {
+          if (ev.blocked) blocked = true;
           if (ev.rateLimitRetries) {
             trace("dim", `· ${ev.rateLimitRetries} rate-limit retries absorbed`);
           }
@@ -1088,8 +1104,11 @@ async function ask(event) {
     // Recorded here rather than on the "done" event so a turn cut short by a
     // rate limit or a dropped stream still leaves behind what was actually
     // said. A partial answer is context; a missing one silently desynchronises
-    // the transcript from what the operator can see on screen.
-    remember("assistant", replyText);
+    // the transcript from what the operator can see on screen. A turn the
+    // input guardrail refused is the one case with nothing to record: it is
+    // unsaid instead, question included.
+    if (blocked) forget("user", message);
+    else remember("assistant", replyText);
 
     stopPending();
     chat.querySelector(".cursor-line")?.remove();
