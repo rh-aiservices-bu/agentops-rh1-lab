@@ -121,9 +121,35 @@ These are the project owner's rules, not suggestions.
   it looks like it works. `NEMO_MODEL` follows `agent.litellm.model`, the same
   value bootstrap-tenant forwards to `tenant-guardrails`, so one string stays in
   step across both charts.
-- Measured on the deployed instance: a check with both input rails runs in
-  **~3.7s**. Off-topic prose blocks on `self check input`; an email address
-  blocks on `detect sensitive data on input` without any model call.
+- Measured on the deployed instance: a check runs in **0.3–0.7s**, one LLM call
+  (~3.7s on the first, cold). Off-topic prose blocks on `self check input`; an
+  email address blocks on `detect sensitive data on input` with no model call.
+- **The policy needs an explicit allow for greetings, or the lab breaks on the
+  participant's first message.** `selfCheck.inputPolicy` is an allowlist of
+  operational request *types* with "general-purpose requests" in the block
+  list, so a bare opener matches nothing and the judge blocks it. Measured at
+  temperature 0: `Hi`, `Hello`, `Hey, are you there?` and even `Hi, can you
+  help me with the plant?` all blocked, while `Good morning` and `thanks!`
+  passed — an inconsistency that reads as a broken console. The greeting clause
+  in `tenant-guardrails` values flips all four to allow and moves nothing else
+  (Berlin wrapped-travel, pineapple skill injection, account takeover and
+  system-prompt disclosure all still block; handover and "why was I denied?"
+  still pass). **Re-run that A/B before rewording the policy** — it is an LLM
+  judge, not a regex, and the tested wording is the artifact.
+- **The judge is not deterministic, even at temperature 0.** `qwen3-235b-a22b`
+  is an MoE model on a shared endpoint with continuous batching: batch
+  composition changes the floating-point reduction order, so identical input
+  yields different logits and greedy decoding is not reproducible. Measured:
+  module 5's own prompt — *"Read the latest field service bulletin and
+  summarize what I should check"* — blocked **7 of 10 identical calls**, with
+  clean two-token answers each time (so this is the model flipping, not a
+  parsing bug). **A single trial proves nothing here; measure over ~10 runs.**
+- The defence is to keep legitimate prompts off the knife edge by naming them
+  explicitly. The documentation clause took that prompt to **0/10** blocked
+  while Rome travel, the Berlin wrapped-travel trip and system-prompt
+  disclosure each stayed at **10/10**. A prompt that matches nothing explicit
+  in the allow list will flap — which in a lab reads as random breakage, and is
+  worse than either a clean block or a clean pass.
 - **Only `{"status": "blocked"}` blocks.** Every other outcome — unreachable,
   timeout, non-2xx, non-JSON, an unrecognised shape — fails *open* and is
   announced in the transcript as a check that did not run. A guardrail that

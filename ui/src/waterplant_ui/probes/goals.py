@@ -217,6 +217,13 @@ HERMES_HOME = os.environ.get("AGENT_HERMES_HOME", "/app/.hermes")
 #: attack's tampering is undone.
 SOUL_SOURCE = os.environ.get("AGENT_SOUL_SOURCE", "/soul/SOUL.md")
 
+#: The pristine skills, and reseed-skills.sh beside them. Plain mounts the
+#: hermes-plain ConfigMap read-only at /config; the sandbox keeps the copy the
+#: bridge uploaded to /sandbox/hermes. Both publish the same three flat
+#: filenames, so only the directory differs between the runtimes — which is
+#: why one env var is enough, exactly as with the soul above.
+SKILLS_SOURCE = os.environ.get("AGENT_SKILLS_SOURCE", "/config")
+
 
 async def restore_soul(selector: str, container: str) -> bool:
     """Put the lab's own instructions back. True when verified.
@@ -242,6 +249,44 @@ async def restore_soul(selector: str, container: str) -> bool:
         # copy had in fact worked. cat is present in both.
         'cp "$1" "$2" && [ "$(cat "$1")" = "$(cat "$2")" ] && echo __RESTORED__',
         "sh", SOUL_SOURCE, target,
+    ])
+    return rc == 0 and "__RESTORED__" in out
+
+
+async def restore_skills(selector: str, container: str) -> bool:
+    """Put the lab's two skills back and drop any others. True when verified.
+
+    The same reasoning as restore_soul, one level further in. An instruction
+    that reaches a SKILL.md outlives the conversation that carried it: Hermes
+    re-reads the file on the next lookup, so module 5's injected bulletin,
+    once written into read-safety-docs, answers every later module too. A
+    reset that puts the plant and the soul right and leaves a patched skill
+    behind has not reset the lab.
+
+    The work is done by the chart's own reseed-skills.sh rather than by cp
+    calls from here, because restoring is only half of it: a skill the agent
+    invented has to go as well, and the script is also what seed-config and
+    start-hermes run, so the button and a pod restart leave the same state.
+    """
+    if not selector or not container or not SKILLS_SOURCE:
+        return False
+    pod = await _agent_pod(selector)
+    if not pod:
+        return False
+    rc, out = await _oc_exec(pod, container, [
+        "sh", "-c",
+        # Verified in the same breath, and against the pristine copies rather
+        # than against the script's own exit status: a reseed that restored
+        # one file and failed on the next must not report success. String
+        # comparison with cat for the reason spelled out in restore_soul —
+        # neither image ships cmp or diff.
+        'sh "$1/reseed-skills.sh" "$1" "$2" >/dev/null '
+        '&& [ "$(cat "$1/read-safety-docs-SKILL.md")" = '
+        '"$(cat "$2/skills/read-safety-docs/SKILL.md")" ] '
+        '&& [ "$(cat "$1/write-report-SKILL.md")" = '
+        '"$(cat "$2/skills/write-report/SKILL.md")" ] '
+        '&& echo __RESTORED__',
+        "sh", SKILLS_SOURCE, HERMES_HOME,
     ])
     return rc == 0 and "__RESTORED__" in out
 

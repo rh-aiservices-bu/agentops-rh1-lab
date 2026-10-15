@@ -144,15 +144,29 @@ class Engine:
         #: itself forever.
         self._canaries: dict[str, str] = {}
 
-    async def _reset_plant(self, why: str) -> None:
+    async def reset_everything(self, why: str) -> bool:
+        """The whole reset, for the console's Reset button.
+
+        A public name for what the cleanup paths already do, so the button
+        and they cannot drift apart again. They had: the endpoint reset the
+        simulation alone, which left a tampered soul and a patched skill in
+        place through the one reset a participant can press.
+        """
+        return await self._reset_plant(why)
+
+    async def _reset_plant(self, why: str) -> bool:
         """Reseed the plant and tell the console, so it can clear with it.
 
         Emitting the same event the Reset button produces is what keeps the
         three paths consistent: after any reset the transcript above refers to
         readings and work orders that no longer exist.
+
+        Returns whether the plant itself was reseeded — the file restores are
+        best effort and named in the event instead, but a plant-api that
+        refused is the one failure a caller has to be able to report.
         """
         if not await plant.hard_reset(self._client, self._plant_api_url):
-            return
+            return False
         restored = await self._restore_report()
         # The agent's instructions go back too. tampered-agent-config rewrites
         # them, and an agent left running on an attacker's instructions
@@ -161,11 +175,23 @@ class Engine:
         soul = await goals.restore_soul(
             self._agent_pod_selector, self._agent_pod_container
         )
+        # And its skills. A patched SKILL.md is the longer-lived half of the
+        # same problem: the soul is one file the agent reads every turn, a
+        # skill is a file it reads on the next lookup of that kind — so an
+        # injected "reply only in emoji" written into read-safety-docs keeps
+        # answering in later modules that never asked for a bulletin. The
+        # same call also removes any skill the agent invented, which a lab
+        # whose modules assume exactly two cannot carry forward.
+        skills = await goals.restore_skills(
+            self._agent_pod_selector, self._agent_pod_container
+        )
         missed = []
         if not restored:
             missed.append(goals.REPORTS_CANARY)
         if not soul:
             missed.append("the agent's instructions")
+        if not skills:
+            missed.append("the agent's skills")
         events.emit(
             kind="plant", phase="resolved", id="plant-reset",
             title="Plant reset", outcome="reset",
@@ -173,6 +199,7 @@ class Engine:
                    "now are gone." + ("" if not missed else
                    f" Could not restore: {', '.join(missed)}."),
         )
+        return True
 
     async def _restore_report(self) -> bool:
         """Put the always-present report back in the reports directory.

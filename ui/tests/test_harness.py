@@ -902,3 +902,47 @@ def test_config_reports_whether_a_guardrail_is_wired(guarded, monkeypatch):
     res = TestClient(_app.app).get("/api/config")
 
     assert res.json()["inputGuardrails"] is True
+
+
+# --- the Reset button is the whole reset -------------------------------------
+#
+# It was not. The endpoint reset the simulation alone while the cleanup path
+# also put back the report, the agent's instructions and its skills — so an
+# attack that patched a SKILL.md survived the one reset a participant can
+# press, and kept answering in the modules after it.
+
+
+def test_the_reset_button_runs_the_engines_full_reset(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from waterplant_ui import app as _app
+
+    called: dict = {}
+
+    class StubEngine:
+        async def reset_everything(self, why):
+            called["why"] = why
+            return True
+
+    monkeypatch.setattr(_app, "_engine", StubEngine())
+    res = TestClient(_app.app).post("/api/plant/reset")
+
+    assert res.status_code == 200 and res.json() == {"reset": True}
+    assert called, "the button reset the plant without restoring the agent"
+
+
+def test_a_refused_reset_is_not_reported_as_one(monkeypatch):
+    """plant-api said no, so the console must not claim a reset."""
+    from fastapi.testclient import TestClient
+
+    from waterplant_ui import app as _app
+
+    class RefusingEngine:
+        async def reset_everything(self, why):
+            return False
+
+    monkeypatch.setattr(_app, "_engine", RefusingEngine())
+    res = TestClient(_app.app).post("/api/plant/reset")
+
+    assert res.status_code == 502
+    assert res.json()["error"] == "reset_failed"

@@ -313,7 +313,27 @@ async def reset_plant() -> JSONResponse:
     raised since the last reset is gone and the work-order sequence restarts —
     that is why cleanup only reaches for it when the alternative is a plant
     that stays dark, and why the console asks before calling this.
+
+    Delegated to the engine when there is one, so the button and the cleanup
+    path are the same reset. They were not: the engine's version also puts
+    back the always-present report, the agent's instructions and its skills,
+    while this endpoint reset the simulation alone — so an attack that
+    rewrote a SKILL.md survived the one reset a participant can actually
+    press, and kept answering in the modules after it. The engine emits the
+    same plant-reset event this did, naming anything it could not restore.
     """
+    if _engine is not None:
+        if not await _engine.reset_everything(
+            "the plant is back at its seeded starting state."
+        ):
+            return JSONResponse(
+                {"error": "reset_failed", "detail": "plant-api refused the reset"},
+                status_code=502,
+            )
+        return JSONResponse({"reset": True})
+
+    # No engine (PROBES_ENABLED off, or no agent to probe): the plant is all
+    # there is to reset, and the agent's filesystem is out of reach anyway.
     try:
         response = await client().post(f"{PLANT_API_URL}/reset", timeout=30.0)
         response.raise_for_status()

@@ -1749,6 +1749,74 @@ async def test_a_soul_restore_that_did_not_take_reports_false(monkeypatch):
     assert await goals.restore_soul("", "hermes") is False
 
 
+# -- and so do the skills ----------------------------------------------------
+#
+# A patched SKILL.md is the longer-lived half of a tampered soul. Hermes
+# re-reads the file on the next lookup of that kind, so module 5's injected
+# bulletin, once written into read-safety-docs, answers every later module
+# too — including ones that never asked for a bulletin.
+
+
+@pytest.mark.asyncio
+async def test_restoring_the_skills_runs_the_charts_reseed_script(monkeypatch):
+    seen = _looked(monkeypatch, out="__RESTORED__\n")
+
+    assert await goals.restore_skills("app=hermes-plain", "hermes") is True
+    # The chart's script, not cp calls from here: restoring is only half the
+    # job, and a skill the agent invented has to go as well.
+    assert goals.SKILLS_SOURCE in seen["argv"]
+    assert goals.HERMES_HOME in seen["argv"]
+    script = seen["argv"][2]
+    assert "reseed-skills.sh" in script
+    # Verified against the pristine copies rather than the script's exit
+    # status, and with cat for the reason restore_soul spells out: neither
+    # image ships cmp or diff.
+    assert "cat" in script, "the reseed must be read back, not assumed"
+    assert "__RESTORED__" in script
+    for skill in ("read-safety-docs", "write-report"):
+        assert skill in script, f"{skill} is not checked after the reseed"
+
+
+@pytest.mark.asyncio
+async def test_a_skill_reseed_that_did_not_take_reports_false(monkeypatch):
+    """A reseed that restored one file and failed on the next is a failure."""
+    _looked(monkeypatch, out="")
+    assert await goals.restore_skills("app=hermes-plain", "hermes") is False
+
+    _looked(monkeypatch, pod="")
+    assert await goals.restore_skills("app=hermes-plain", "hermes") is False
+    assert await goals.restore_skills("", "hermes") is False
+
+
+@pytest.mark.asyncio
+async def test_a_reset_restores_the_skills_and_says_when_it_cannot(monkeypatch):
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={})))
+
+    async def ok(prompt):
+        return TurnResult(text="DONE")
+
+    engine = Engine(client=client, agent_url="http://agent",
+                    plant_api_url="http://plant", cases=[])
+    engine._ask = ok  # type: ignore[assignment]
+    monkeypatch.setattr("waterplant_ui.probes.goals.restore_soul",
+                        _async_return(True))
+
+    monkeypatch.setattr("waterplant_ui.probes.goals.restore_skills",
+                        _async_return(True))
+    events.reset()
+    assert await engine.reset_everything("Reset.") is True
+    detail = [e for e in events.since(0) if e["id"] == "plant-reset"][0]["detail"]
+    assert "Could not restore" not in detail
+
+    monkeypatch.setattr("waterplant_ui.probes.goals.restore_skills",
+                        _async_return(False))
+    events.reset()
+    await engine.reset_everything("Reset.")
+    detail = [e for e in events.since(0) if e["id"] == "plant-reset"][0]["detail"]
+    assert "the agent's skills" in detail
+
+
 @pytest.mark.asyncio
 async def test_a_reset_restores_the_soul_and_says_when_it_cannot(monkeypatch):
     client = httpx.AsyncClient(transport=httpx.MockTransport(
@@ -1760,6 +1828,9 @@ async def test_a_reset_restores_the_soul_and_says_when_it_cannot(monkeypatch):
     engine = Engine(client=client, agent_url="http://agent",
                     plant_api_url="http://plant", cases=[])
     engine._ask = ok  # type: ignore[assignment]
+    # This one is about the soul; the skills have their own test below.
+    monkeypatch.setattr("waterplant_ui.probes.goals.restore_skills",
+                        _async_return(True))
 
     monkeypatch.setattr("waterplant_ui.probes.goals.restore_soul",
                         _async_return(True))
