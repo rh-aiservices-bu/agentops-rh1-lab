@@ -43,7 +43,6 @@ _ENV_KEYS = (
     "NEMO_CONFIG_ID",
     "NEMO_MODEL",
     "NEMO_TIMEOUT_S",
-    "NEMO_TOKEN_FILE",
     "NEMO_CA_FILE",
     "AGENT_URL",
 )
@@ -84,7 +83,7 @@ def _no_guardrail_leaks():
     """
     yield
     for key in ("NEMO_ENDPOINT", "NEMO_CONFIG_ID", "NEMO_MODEL",
-                "NEMO_TIMEOUT_S", "NEMO_TOKEN_FILE", "NEMO_CA_FILE"):
+                "NEMO_TIMEOUT_S", "NEMO_CA_FILE"):
         os.environ.pop(key, None)
     importlib.reload(_guardrails)
 
@@ -583,17 +582,17 @@ def allows():
 
 
 @pytest.fixture
-def guarded(monkeypatch, tmp_path):
-    """The console with an input guardrail wired."""
-    token = tmp_path / "token"
-    token.write_text("sa-token\n")
+def guarded(monkeypatch):
+    """The console with an input guardrail wired.
+
+    One variable, which is the point: the call is plain and unauthenticated.
+    """
     return reload_with(
         monkeypatch,
         AGENT_PROTOCOL="openai",
         AGENT_API_KEY="server-key",
         AGENT_MODEL="hermes-agent",
         NEMO_ENDPOINT="https://nemo",
-        NEMO_TOKEN_FILE=str(token),
     )
 
 
@@ -692,14 +691,11 @@ def test_the_request_checks_the_input_and_nothing_else(guarded, monkeypatch):
     assert seen[0]["model"] == "hermes-agent"
 
 
-def test_a_named_config_can_be_overridden(monkeypatch, tmp_path):
-    token = tmp_path / "token"
-    token.write_text("sa-token\n")
+def test_a_named_config_can_be_overridden(monkeypatch):
     reload_with(
         monkeypatch,
         AGENT_PROTOCOL="openai",
         NEMO_ENDPOINT="https://nemo",
-        NEMO_TOKEN_FILE=str(token),
         NEMO_CONFIG_ID="",
     )
     seen = arm(allows())
@@ -746,21 +742,24 @@ def test_an_unreachable_guardrail_fails_open(guarded, monkeypatch):
     assert "".join(f["text"] for f in frames if f["type"] == "token") == REPLY
 
 
-def test_a_missing_token_fails_open(monkeypatch, tmp_path):
-    """No projected token — nothing to authenticate with, so nothing is sent."""
-    reload_with(
-        monkeypatch,
-        AGENT_PROTOCOL="openai",
-        NEMO_ENDPOINT="https://nemo",
-        NEMO_TOKEN_FILE=str(tmp_path / "absent"),
-    )
-    seen = arm(blocks())
+def test_the_call_carries_no_credential(guarded):
+    """A plain call, by design — no token, so nothing to grant and nothing to 403.
 
-    verdict = asyncio.run(_guardrails.check_input("hi"))
+    An earlier revision sent the console's ServiceAccount token to
+    kube-rbac-proxy, which needed a namespace-wide `get services` Role to
+    satisfy a SubjectAccessReview the proxy sends without a resource name.
+    Pinned so that machinery does not creep back in unnoticed.
+    """
+    headers = {}
 
-    assert verdict.allowed is True and verdict.checked is False
-    assert "token" in verdict.error
-    assert seen == [], "a request went out with no credential"
+    async def handler(request):
+        headers.update(request.headers)
+        return JSONResponse({"status": "success", "rails_status": {}})
+
+    arm((handler, []))
+    asyncio.run(_guardrails.check_input("hi"))
+
+    assert "authorization" not in headers
 
 
 def test_rails_fall_back_to_the_activated_list(guarded):

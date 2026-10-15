@@ -90,27 +90,49 @@ These are the project owner's rules, not suggestions.
   which is every prompt entry point, probes included. Off unless
   `NEMO_ENDPOINT` is set, which is the shipped state: the baseline has no
   guardrail, and module 6 is where a participant sets the variable by hand.
-- **It is HTTPS on 443 behind `kube-rbac-proxy`, not plain HTTP on 8080**, and
-  the Service is `nemo-guardrails` (singular `nemo-guardrail` appears in older
-  notes and is wrong). `security.opendatahub.io/enable-auth` on the CR is what
-  puts the proxy there.
-- Authorization is a SelfSubjectAccessReview for `get` on `services` with
-  **`resourceName: nemo-guardrails-service`** — a name no Service actually
-  has. The proxy matches the string in its own `nemo-guardrails-rbac-proxy-config`,
-  and nothing reconciles it with the real object, so the console's Role must
-  use the proxy's string. Same class as the `mlflow.kubeflow.org` group above:
-  RBAC matches strings. Verified: without the Role the UI's SA gets
-  `Forbidden (verb=get, resource=services)`.
-- Both the token and the service-signer CA are already in the UI pod's
-  ServiceAccount projection (`token`, `service-ca.crt`), so this needs no
-  Secret, ConfigMap or extra volume.
-- **Only `{"status": "blocked"}` blocks.** Every other outcome — 403, timeout,
-  non-JSON, an unrecognised shape — fails *open* and is announced in the
-  transcript as a check that did not run. A guardrail that quietly stops
-  working must not look like one that refused.
+- **The call is plain and unauthenticated, on purpose.** `NEMO_ENDPOINT` is
+  the Service address and the whole configuration — no token, no Role, no RBAC.
+  `tenant-guardrails` sets `guardrails.authEnabled: false` to keep it that way.
+- **Why not auth:** with `security.opendatahub.io/enable-auth` the operator puts
+  `kube-rbac-proxy` in front of the *Service* as well as the Route, so a call
+  between two pods in one namespace needed a bearer token plus a
+  **namespace-wide `get services`** grant. Namespace-wide because the proxy's
+  own scoping silently fails: its ConfigMap writes
+  `resourceAttributes.resourceName` where upstream kube-rbac-proxy reads
+  **`name`**, so the key is dropped and the SubjectAccessReview goes out with no
+  resource name — a `resourceNames` Role looks tighter and 403s every check.
+  (The string it names, `nemo-guardrails-service`, is not any Service's name
+  either; the object is `nemo-guardrails`.) **The tell is in the error:** a 403
+  reading `verb=get, resource=services, subresource=` names no resource. All of
+  that was measured on cluster-pz7xk before auth was switched off — keep it
+  here in case anyone turns `authEnabled` back on.
+- **What switching it off gives up:** the operator always creates a Route and
+  the CRD exposes no knob to suppress it (`spec` is only `caBundleConfig`,
+  `env`, `nemoConfigs`, `replicas`, `template`), so the endpoint is publicly
+  reachable and unauthenticated. Tolerated because every rail is advisory, the
+  console fails open, and the tenant is a scratch workshop namespace.
+- **Only `{"status": "blocked"}` blocks.** Every other outcome — unreachable,
+  timeout, non-2xx, non-JSON, an unrecognised shape — fails *open* and is
+  announced in the transcript as a check that did not run. A guardrail that
+  quietly stops working must not look like one that refused.
+- `NEMO_CA_FILE` exists only so an `https://` endpoint still verifies — an
+  in-cluster certificate is signed by `openshift-service-serving-signer`, which
+  no public trust store knows. It defaults to the `service-ca.crt` already in
+  every pod's projection, so it needs no Secret, ConfigMap or volume, and costs
+  nothing when the endpoint is plain HTTP.
 - `NEMO_ENDPOINT` is in the platform Application's `ignoreDifferences`
   alongside `AGENT_URL`; that chart self-heals, so without the entry the hand
   edit is reverted within a sync interval.
+- **`ignoreDifferences` is bidirectional, and that surprises people.** With
+  `RespectIgnoreDifferences=true` Argo strips the ignored path from the
+  *desired* state too, so a variable named there is **never created** — it does
+  not arrive as an empty placeholder waiting to be overwritten. Proof in
+  `user-w562s-agentops`: `NEMO_CONFIG_ID` and `NEMO_ENDPOINT` are rendered by
+  the same template two lines apart and differ only in being ignored; only the
+  un-ignored one is on the live Deployment. `AGENT_URL` is live only because it
+  predates its own ignore entry. So an `oc set env` is what *creates* such a
+  variable, and the ignore entry is only what stops self-heal removing it
+  again. Do not "fix" a missing ignored env var by rendering it harder.
 - **The operator sets no memory limit on the server container** and the CR
   exposes no knob for it, so it inherits the namespace LimitRange default of
   512Mi and is **OOMKilled on its first check** (cluster-pz7xk: `exit=137`,

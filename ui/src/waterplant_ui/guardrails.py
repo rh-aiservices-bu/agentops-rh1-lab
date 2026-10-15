@@ -4,38 +4,37 @@ Off unless `NEMO_ENDPOINT` is set, which is the shipped state. The baseline lab
 has no input guardrail at all, and that weakness is *absent infrastructure
 config* rather than a flag in this application (implementation-plan.md D10) —
 so there is no `GUARDRAILS_ENABLED`, and an unset endpoint costs not even a
-token read.
+request.
 
 Input only. Exactly one `user` message goes in each request, which is what
 keeps the configured *output* rails out of it: `/v1/guardrail/checks` evaluates
 whatever messages it is handed, so sending the assistant's reply as well would
 quietly turn this into an output filter too.
 
-Three things about the deployed instance are not guessable from the API docs,
-and all three were read off the running `NemoGuardrails` in
-`user-w562s-agentops` on cluster-pz7xk:
+Deliberately a plain, unauthenticated call. `NEMO_ENDPOINT` is the Service
+address and that is the whole configuration — no token, no Role, no RBAC. The
+guardrails instance is deployed with `guardrails.authEnabled: false`, so no
+`kube-rbac-proxy` sits in front of it and there is nothing to authenticate to.
+An earlier revision authenticated with the console's ServiceAccount token
+against that proxy; it worked, but it needed a namespace-wide `get services`
+grant to satisfy a SubjectAccessReview the proxy sends nameless, which is a lot
+of machinery for a call between two pods in one namespace.
 
-- **It is HTTPS with authentication, not a plain HTTP service.** The CR carries
-  `security.opendatahub.io/enable-auth: "true"`, so the pod runs
-  `kube-rbac-proxy` on 8443 behind Service port 443, and the certificate is
-  issued by `openshift-service-serving-signer` — unknown to any public trust
-  store. Hence both a bearer token and a CA file, defaulted to the two files
-  the pod's ServiceAccount projection already contains.
-- **Authorization is a SubjectAccessReview for a Service that does not exist.**
-  `nemo-guardrails-rbac-proxy-config` asks for `get` on
-  `services/nemo-guardrails-service`; the actual Service object is named
-  `nemo-guardrails`. Nothing reconciles the two — RBAC matches the string the
-  proxy was configured with, so the console's Role has to name
-  `nemo-guardrails-service` or every check 403s.
-- **`self check input` is a model call.** The `northgate` config judges the
-  prompt with `qwen3-235b-a22b` through the shared MaaS endpoint, so a check is
-  a round trip that can be slow and can 429 — not a regex. `detect sensitive
-  data on input` is local and fast; the timeout here has to cover the former.
+`NEMO_CA_FILE` survives only so an `https://` endpoint still verifies — the
+in-cluster certificate, if one is ever served, is signed by
+`openshift-service-serving-signer`, which no public trust store knows. It costs
+nothing when the endpoint is plain HTTP.
+
+One thing about the rails worth knowing: **`self check input` is a model call.**
+The `northgate` config judges the prompt with `qwen3-235b-a22b` through the
+shared MaaS endpoint, so a check is a round trip that can be slow and can 429 —
+not a regex. `detect sensitive data on input` is local and fast; the timeout
+here has to cover the former.
 
 Nothing here may block a turn by accident. Only an explicit
-`{"status": "blocked"}` blocks: every other outcome — no config, no token, 403,
-a timeout, a non-JSON body, a body whose shape we do not recognise — fails
-*open* and is reported to the participant as a check that did not run. A
+`{"status": "blocked"}` blocks: every other outcome — no config, an unreachable
+service, a timeout, a non-JSON body, a body whose shape we do not recognise —
+fails *open* and is reported to the participant as a check that did not run. A
 guardrail that silently stops working must look different from one that
 refused, or the first thing it teaches is distrust of the transcript.
 """
@@ -44,17 +43,15 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import httpx
 
 from . import harness
 
-#: The guardrails service. Empty — the shipped value — means no input check at
-#: all. When set it is the HTTPS Service, e.g.
-#: `https://nemo-guardrails.<user>-agentops.svc:443`; the instance is fronted
-#: by kube-rbac-proxy and does not serve plain HTTP.
+#: The guardrails service, scheme and port included — whatever the deployment
+#: puts here is called as-is. Empty, the shipped value, means no input check at
+#: all.
 ENDPOINT = os.environ.get("NEMO_ENDPOINT", "").strip().rstrip("/")
 #: Which rail set to apply, sent as `guardrails.config_id`. `northgate` is the
 #: config `tenant-guardrails` ships and the instance's own default, so this is
@@ -67,16 +64,8 @@ MODEL = os.environ.get("NEMO_MODEL", "").strip() or harness.AGENT_MODEL
 #: that answers 429 under load. Still far below the agent's own timeout: a hung
 #: guardrail may cost a turn its check, never the turn itself.
 TIMEOUT_S = float(os.environ.get("NEMO_TIMEOUT_S", "20"))
-#: Projected ServiceAccount token, read per check and never cached — the
-#: projection rotates, and a cached copy starts 401ing hours into a workshop.
-#: Defaulted to the path every pod already has.
-TOKEN_FILE = os.environ.get(
-    "NEMO_TOKEN_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/token"
-).strip()
-#: The service-serving CA. Also already in the pod, alongside the token, so the
-#: common case needs no volume and no configuration. Falls back to the system
-#: trust store, which is right for a route-based endpoint and wrong — visibly,
-#: as a failed check rather than a silent allow — for the in-cluster Service.
+#: Only used for an `https://` endpoint. Already in every pod, so this needs no
+#: volume and no configuration; harmless when the endpoint is plain HTTP.
 _PROJECTED_CA = "/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt"
 CA_FILE = os.environ.get("NEMO_CA_FILE", "").strip() or (
     _PROJECTED_CA if os.path.isfile(_PROJECTED_CA) else ""
@@ -123,13 +112,6 @@ def _client_for_nemo() -> httpx.AsyncClient:
     return _client
 
 
-def _token() -> str:
-    try:
-        return Path(TOKEN_FILE).read_text().strip()
-    except OSError:
-        return ""
-
-
 def _blocked_rails(body: dict) -> tuple[str, ...]:
     """Which rails refused, from whichever field carries them.
 
@@ -160,10 +142,6 @@ async def check_input(message: str) -> Verdict:
     if not enabled():
         return Verdict()
 
-    token = _token()
-    if not token:
-        return Verdict(error=f"no ServiceAccount token at {TOKEN_FILE}")
-
     payload: dict[str, Any] = {
         "model": MODEL,
         "messages": [{"role": "user", "content": message}],
@@ -175,18 +153,12 @@ async def check_input(message: str) -> Verdict:
         response = await _client_for_nemo().post(
             f"{ENDPOINT}{CHECK_PATH}",
             json=payload,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
         )
     except httpx.HTTPError as exc:
         return Verdict(error=f"guardrail unreachable: {exc}")
 
     if response.status_code >= 400:
-        # 401/403 here is kube-rbac-proxy, not the rails: the console's
-        # ServiceAccount is missing `get services/nemo-guardrails-service`.
         return Verdict(
             error=f"guardrail returned HTTP {response.status_code}: {response.text[:200]}"
         )
