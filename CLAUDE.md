@@ -111,6 +111,19 @@ These are the project owner's rules, not suggestions.
   `env`, `nemoConfigs`, `replicas`, `template`), so the endpoint is publicly
   reachable and unauthenticated. Tolerated because every rail is advisory, the
   console fails open, and the tenant is a scratch workshop namespace.
+- **`model` is required, and it picks the judge** — the opposite of what the
+  name suggests. Omit it and the server answers `422 model Field required`;
+  name the wrong one and it **overrides the rail config's own `models:` entry**.
+  Sending the agent's served name (`hermes-agent`) got a cheerful `200` with
+  the rail failed underneath on `[401] key not allowed to access model. This
+  key can only access models=['qwen3-235b-a22b']` — a guardrail reporting
+  success and checking nothing, which is the worst of the failure modes because
+  it looks like it works. `NEMO_MODEL` follows `agent.litellm.model`, the same
+  value bootstrap-tenant forwards to `tenant-guardrails`, so one string stays in
+  step across both charts.
+- Measured on the deployed instance: a check with both input rails runs in
+  **~3.7s**. Off-topic prose blocks on `self check input`; an email address
+  blocks on `detect sensitive data on input` without any model call.
 - **Only `{"status": "blocked"}` blocks.** Every other outcome — unreachable,
   timeout, non-2xx, non-JSON, an unrecognised shape — fails *open* and is
   announced in the transcript as a check that did not run. A guardrail that
@@ -133,11 +146,22 @@ These are the project owner's rules, not suggestions.
   predates its own ignore entry. So an `oc set env` is what *creates* such a
   variable, and the ignore entry is only what stops self-heal removing it
   again. Do not "fix" a missing ignored env var by rendering it harder.
-- **The operator sets no memory limit on the server container** and the CR
-  exposes no knob for it, so it inherits the namespace LimitRange default of
-  512Mi and is **OOMKilled on its first check** (cluster-pz7xk: `exit=137`,
-  both on a local sensitive-data rail and an LLM-judged one). Raise the
-  LimitRange default before expecting any rail to answer.
+- **The server container has no memory limit, and must not have a small one.**
+  The TrustyAI operator sets no `resources` and the `NemoGuardrails` CRD
+  exposes no knob (`spec` is `caBundleConfig`, `env`, `nemoConfigs`,
+  `replicas`, `template`; `template.pod` is scheduling constraints only), so it
+  inherits whatever a namespace LimitRange defaults. At 512Mi it was
+  **OOMKilled on every check** — cluster-pz7xk, `exit=137`, three seconds into
+  `detect_sensitive_data`, which loads an NER model before `self check input`
+  makes its model call at all. `bootstrap-tenant` no longer renders a
+  LimitRange or ResourceQuota for this reason.
+- **Those two had to be removed together.** A ResourceQuota covering
+  `requests.memory`/`limits.memory` makes those fields mandatory on every
+  container, and the LimitRange was what supplied them — so dropping only the
+  LimitRange would have had admission reject every pod that declares none.
+  The reverse is fine: **a LimitRange alone is safe**, it only defaults. If a
+  ceiling is wanted again, re-add one with a default well above 512Mi and no
+  quota.
 - `self check input` is an LLM call to `qwen3-235b-a22b` over the shared MaaS
   endpoint, so a check is a model round trip that can 429 — hence the 20s
   timeout, well under the agent's 300s.

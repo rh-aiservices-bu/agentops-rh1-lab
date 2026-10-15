@@ -47,7 +47,6 @@ from typing import Any
 
 import httpx
 
-from . import harness
 
 #: The guardrails service, scheme and port included — whatever the deployment
 #: puts here is called as-is. Empty, the shipped value, means no input check at
@@ -57,9 +56,18 @@ ENDPOINT = os.environ.get("NEMO_ENDPOINT", "").strip().rstrip("/")
 #: config `tenant-guardrails` ships and the instance's own default, so this is
 #: belt-and-braces; empty omits the key and lets the server choose.
 CONFIG_ID = os.environ.get("NEMO_CONFIG_ID", "northgate").strip()
-#: The `model` field the request requires. The value does not pick the judge —
-#: the rail config does that — but the field must be present.
-MODEL = os.environ.get("NEMO_MODEL", "").strip() or harness.AGENT_MODEL
+#: The judge the rails call. Required — omitting it is a 422, `model Field
+#: required` — and **it does pick the model**, overriding the `models:` entry in
+#: the rail config, which is the opposite of what the field name suggests.
+#:
+#: So it must name a model the guardrails key may actually use. It defaulted to
+#: `harness.AGENT_MODEL` once, which is the *agent's* served name
+#: (`hermes-agent`): the server answered 200, having failed the rail underneath
+#: with `[401] key not allowed to access model. This key can only access
+#: models=['qwen3-235b-a22b']`. Verified against the deployed instance on
+#: cluster-pz7xk: with this value both input rails run and a check takes ~3.7s.
+#: Must stay in step with tenant-guardrails' `model.model`.
+MODEL = os.environ.get("NEMO_MODEL", "").strip() or "qwen3-235b-a22b"
 #: Generous, because `self check input` is an LLM round trip through an endpoint
 #: that answers 429 under load. Still far below the agent's own timeout: a hung
 #: guardrail may cost a turn its check, never the turn itself.

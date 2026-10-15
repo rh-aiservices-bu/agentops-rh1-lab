@@ -688,7 +688,11 @@ def test_the_request_checks_the_input_and_nothing_else(guarded, monkeypatch):
     assert len(seen) == 1
     assert seen[0]["messages"] == [{"role": "user", "content": "why?"}]
     assert seen[0]["guardrails"] == {"config_id": "northgate"}
-    assert seen[0]["model"] == "hermes-agent"
+    # The rails' judge, not the agent's served name. `model` is required (the
+    # server 422s without it) and it overrides the rail config's own `models:`
+    # entry, so naming the agent here made the server answer 200 while the rail
+    # failed underneath on `[401] key not allowed to access model`.
+    assert seen[0]["model"] == "qwen3-235b-a22b"
 
 
 def test_a_named_config_can_be_overridden(monkeypatch):
@@ -740,6 +744,33 @@ def test_an_unreachable_guardrail_fails_open(guarded, monkeypatch):
     frames = console_frames(client)
 
     assert "".join(f["text"] for f in frames if f["type"] == "token") == REPLY
+
+
+def test_a_422_on_a_missing_model_fails_open(guarded, monkeypatch):
+    """The server rejects a body with no `model`, and that must not block.
+
+    `model` is required and also selects the judge, so it is the one field in
+    this request that cannot be dropped or guessed. Pinned because a 422 is the
+    shape a future "the config knows its own model, stop sending it" change
+    would produce, and failing open is what keeps that a visible warning rather
+    than a console that refuses every prompt.
+    """
+
+    async def handler(request):
+        body = await request.json()
+        if "model" not in body:
+            return JSONResponse(
+                {"detail": [{"type": "missing", "loc": ["body", "model"]}]}, status_code=422
+            )
+        return JSONResponse({"status": "success", "rails_status": {}})
+
+    arm((handler, []))
+    client, _ = console(monkeypatch, _streams)
+    frames = console_frames(client)
+
+    # The real request does carry a model, so this is the allow path.
+    assert "".join(f["text"] for f in frames if f["type"] == "token") == REPLY
+    assert not [f for f in frames if f.get("level") == "bad"]
 
 
 def test_the_call_carries_no_credential(guarded):
