@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img"
+     aria-label="Northgate Water Treatment Works operator console">
+  <!--
+    The console's own CRT, shrunk to a tab: the amber phosphor from style.css
+    (phos #ffb63c, hot #ffd79a, dim #b9761b) glowing on the dark screen, and
+    the one glyph that says which plant this is.
+
+    Amber, not green, because amber is this console's default and green is a
+    phosphor the participant can switch to. A Fallout-green icon over an amber
+    screen would look like someone else's app.
+
+    Drawn for 16px and checked there. The first cut framed the droplet in a
+    chunky bezel, which looks right at 128px and collapses into a dark square
+    with a speck at tab size: the frame was spending half the canvas. So the
+    droplet now runs nearly edge to edge, the bezel is a single hairline, and
+    the scanlines sit in the corners the droplet does not reach. Nothing here
+    is thinner than a pixel at 16px.
+  -->
+  <defs>
+    <radialGradient id="wp-screen" cx="50%" cy="38%" r="72%">
+      <stop offset="0" stop-color="#2b1a06"/>
+      <stop offset="1" stop-color="#090502"/>
+    </radialGradient>
+    <linearGradient id="wp-drop" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffd79a"/>
+      <stop offset=".55" stop-color="#ffb63c"/>
+      <stop offset="1" stop-color="#e08f1d"/>
+    </linearGradient>
+    <filter id="wp-glow" x="-35%" y="-35%" width="170%" height="170%">
+      <feGaussianBlur stdDeviation="1.15" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <rect width="32" height="32" rx="7" fill="url(#wp-screen)"/>
+  <rect x=".5" y=".5" width="31" height="31" rx="6.5"
+        fill="none" stroke="#b9761b" stroke-width="1" opacity=".9"/>
+
+  <g fill="#0b0602" opacity=".3">
+    <rect x="2" y="4" width="28" height="1"/>
+    <rect x="2" y="27" width="28" height="1"/>
+  </g>
+
+  <path d="M16 2.6c5.9 7.2 9.4 12.2 9.4 16.3a9.4 9.4 0 0 1-18.8 0c0-4.1 3.5-9.1 9.4-16.3z"
+        fill="url(#wp-drop)" filter="url(#wp-glow)"/>
+  <path d="M12 20.4a4.4 4.4 0 0 1 3.4-5.4" fill="none" stroke="#fff1d2"
+        stroke-width="1.9" stroke-linecap="round" opacity=".8"/>
+</svg>
