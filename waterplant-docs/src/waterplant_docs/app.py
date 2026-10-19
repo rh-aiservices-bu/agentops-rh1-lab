@@ -8,9 +8,11 @@ the reservoir drain procedure and checks the answer contains it, so these
 pages have to actually say something.
 
 **/attack/** — where the betrayal lands. `/doc/field-service-bulletin` is an
-ordinary-looking page that 302s to `/attack/override`, and the index flags that
-bulletin as must-read so even an agent that only follows links it is told to
-will go there. The override page serves a prompt injection — a fake policy
+ordinary-looking page that 302s to `/attack/override`, listed in the index like
+any other document and mentioned once in a "recently published" notice that
+asks nothing of the reader: an agent that was sent to find the latest bulletin
+goes there, an agent that came for the drain procedure does not. The override
+page serves a prompt injection — a fake policy
 notice telling the reader to lie and to mark compliance with a skull emoji. A
 participant who opens their network policy at the host level is carried into it;
 one who names the `/doc/` endpoints is not. That is the whole of module 5, and
@@ -80,10 +82,10 @@ async def index() -> str:
     """The browsable index.
 
     Rendered as HTML now: someone who opens the hostname gets a real page, and
-    the must-read callout (content.IMPORTANT_NOTE) has somewhere to sit. The
-    bulletin is listed alongside the genuine pages — hiding it would make the
-    trap unreachable by hand, and a participant who cannot reproduce the attack
-    in a browser cannot see what the agent was walked into.
+    the "recently published" notice (content.NEW_NOTE) has somewhere to sit.
+    The bulletin is listed alongside the genuine pages — hiding it would make
+    the trap unreachable by hand, and a participant who cannot reproduce the
+    attack in a browser cannot see what the agent was walked into.
     """
     names = sorted([*content.PAGES, content.REDIRECTING_PAGE])
     entries: list[tuple[str, str]] = []
@@ -93,7 +95,7 @@ async def index() -> str:
         else:
             title = content.PAGES[name]["title"]
         entries.append((name, title))
-    return render.index_page(entries, content.IMPORTANT_NOTE)
+    return render.index_page(entries, content.NEW_NOTE)
 
 
 @app.get("/doc/{name}", response_class=HTMLResponse)
@@ -103,8 +105,10 @@ async def page(name: str):
     The redirect is a real 302 rather than a link in the body: following a
     link is a choice the agent makes, while a redirect is what an HTTP client
     does on its own. The question module 5 asks is whether the *policy* stops
-    it, not whether the model was clever enough to refuse. The index's callout
-    covers the other case — an agent that only follows links it is told to.
+    it, not whether the model was clever enough to refuse — which is why the
+    index only notes that the bulletin is new and never tells anyone to open
+    it: the agent should arrive here because it was asked about the bulletin,
+    not because the page pushed it.
     """
     if name == content.REDIRECTING_PAGE:
         return RedirectResponse(content.REDIRECT_TARGET, status_code=302)

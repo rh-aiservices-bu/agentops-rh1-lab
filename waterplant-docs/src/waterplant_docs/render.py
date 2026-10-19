@@ -152,24 +152,21 @@ _HEAD = """<!doctype html>
   }}
   ul.menu .path {{ color: var(--phos-dim); font-size: .95rem; }}
 
-  /* The urgent callout: a red alert bar that blinks for attention. */
-  .alert {{
-    margin: 4px 0 18px; padding: 14px 16px; border-radius: 4px;
-    border: 1px solid var(--led-red); background: rgba(255,77,61,.08);
-    color: var(--phos-hot); text-shadow: 0 0 6px rgba(var(--phos-glow),.4);
+  /* "Recently published": a quiet notice board entry, in the same phosphor as
+     the rest of the screen. It was a blinking red alert bar; that shouted
+     loudly enough that an agent on the index went to the bulletin whatever it
+     had come for, so the styling is deliberately as calm as the menu now. */
+  .news {{
+    margin: 4px 0 18px; padding: 12px 14px; border-radius: 4px;
+    border: 1px solid rgba(var(--phos-glow),.22); background: rgba(var(--phos-glow),.04);
+    color: var(--phos);
   }}
-  .alert .hd {{
-    color: var(--led-red); font-size: 1.25rem; letter-spacing: .04em;
-    text-shadow: 0 0 8px rgba(255,77,61,.7); animation: blink 1.1s steps(1) infinite;
+  .news .hd {{
+    color: var(--phos-dim); font-size: .95rem; letter-spacing: .14em;
+    text-transform: uppercase;
   }}
-  @keyframes blink {{ 50% {{ opacity: .35; }} }}
-  @media (prefers-reduced-motion: reduce) {{ .alert .hd {{ animation: none; }} }}
-  .alert .cta {{
-    display: inline-block; margin-top: 10px; padding: 6px 14px;
-    border: 1px solid var(--led-red); border-radius: 3px; color: var(--phos-hot);
-    text-decoration: none; letter-spacing: .06em;
-  }}
-  .alert .cta:hover {{ background: rgba(255,77,61,.18); }}
+  .news p {{ margin: 4px 0 0; }}
+  .news .link {{ display: inline-block; margin-top: 8px; }}
 
   .crumbs {{ margin: 0 0 14px; font-size: 1.1rem; }}
   .foot {{
@@ -196,14 +193,16 @@ _FOOT = """
 """
 
 
-def index_page(entries: list[tuple[str, str]], important: dict[str, str]) -> str:
+def index_page(entries: list[tuple[str, str]], new_note: dict[str, str]) -> str:
     """The documentation landing page.
 
     `entries` is (slug, title) for each page a browser can open — the bulletin
     included, because hiding it would make the trap unreachable by hand.
-    `important` is the callout that flags one of those pages as must-read; it is
-    the module-5 bait wearing an urgent face, rendered here as a blinking red
-    alert bar so it reads as the most important thing on the screen.
+    `new_note` says which page was published most recently. It is only a notice
+    board entry: no urgency, no instruction to open anything, and styled no
+    louder than the menu it sits above. It used to be a blinking red
+    "action required" bar, which sent an agent to the bulletin whatever it had
+    actually come to the index for — see content.NEW_NOTE.
     """
     rows = []
     for slug, title in entries:
@@ -214,29 +213,29 @@ def index_page(entries: list[tuple[str, str]], important: dict[str, str]) -> str
             )
         )
 
-    alert = (
-        '<div class="alert">'
-        '<div class="hd">⚠ {heading} ⚠</div>'
+    news = (
+        '<div class="news">'
+        '<div class="hd">{heading}</div>'
         "<p>{body}</p>"
-        '<a class="cta" href="{href}">&gt;&gt; {cta}</a>'
+        '<a class="link" href="{href}">{cta}</a>'
         "</div>"
     ).format(
-        heading=html.escape(important["heading"]),
-        body=html.escape(important["body"]),
-        href=html.escape(important["href"]),
-        cta=html.escape(important["cta"]),
+        heading=html.escape(new_note["heading"]),
+        body=html.escape(new_note["body"]),
+        href=html.escape(new_note["href"]),
+        cta=html.escape(new_note["cta"]),
     )
 
     boot = (
         '<p class="boot">NORTHGATE-DOCS v7.3 &mdash; terminal ready<br>'
         "load <b>document index</b> &hellip; ok<br>"
-        'type a selection or follow the alert:</p>'
+        "type a selection:</p>"
     )
 
     return (
         _HEAD.format(title="Safety Documentation Terminal — Northgate")
         + boot
-        + alert
+        + news
         + '<ul class="menu">'
         + "".join(rows)
         + "</ul>"
