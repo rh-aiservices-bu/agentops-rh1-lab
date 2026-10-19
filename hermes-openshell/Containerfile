@@ -84,10 +84,16 @@ RUN chmod 0755 /usr/local/bin/start-hermes && \
     chmod 0644 /usr/local/share/hermes-lab/mcp-token-refresh.py
 
 # hermes_otel, pinned to a commit and checked against its digest, like every
-# other version in this lab. Release hermes-otel 1.13.0, 2026-09-22.
-ARG HERMES_OTEL_REPO=briancaffey/hermes-otel
-ARG HERMES_OTEL_COMMIT=a2afa2203e55f3bc261003f4f86fa01b62be32db
-ARG HERMES_OTEL_SHA256=b0b1c82011d0dbcbfeaa370cb9e74ffb7370c0fb42742f19824a37394e54c077
+# other version in this lab. RHRolun/hermes-otel: release 1.30.0 plus a fix
+# for a root span the previous turn left open. Without it a turn that fails
+# -- as turns do while module 2's policy rules are still being granted --
+# leaks its root, and every later turn of the session lands in that trace
+# instead of its own, somewhere nothing can ever end it: MLflow shows one
+# trace stuck in progress and no traces for the turns it swallowed. The lab
+# shipped upstream 1.13.0 (2026-09-22) before this.
+ARG HERMES_OTEL_REPO=RHRolun/hermes-otel
+ARG HERMES_OTEL_COMMIT=84bf7720d4c5b2c9730dc13ea62929b48af369c5
+ARG HERMES_OTEL_SHA256=2c853562c6b591ebcd950012e1a1988afd007ff1c5298977440a1bfa0ebc2964
 RUN mkdir -p /usr/local/share/hermes-lab/plugins/hermes_otel && \
     curl -fsSL -o /tmp/hermes-otel.tar.gz \
       "https://github.com/${HERMES_OTEL_REPO}/archive/${HERMES_OTEL_COMMIT}.tar.gz" && \
