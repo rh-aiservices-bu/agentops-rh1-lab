@@ -1772,6 +1772,119 @@ async def test_a_soul_restore_that_did_not_take_reports_false(monkeypatch):
     assert await goals.restore_soul("", "hermes") is False
 
 
+# -- which runtime's filesystem the console is pointed at ---------------------
+#
+# The console used to be told this by a chart template evaluated at render
+# time, while AGENT_URL — the thing module 2 has participants change — moved
+# underneath it. Observed on cluster-zwtpw: AGENT_URL naming hermes-agent with
+# AGENT_POD_SELECTOR still naming hermes-plain, so the console chatted with
+# hermie and reset the plain pod's files.
+
+
+def _reloaded_goals(monkeypatch, **env):
+    import importlib
+
+    from waterplant_ui.probes import goals as mod
+
+    for key in (
+        "AGENT_URL", "AGENT_POD_SELECTOR", "AGENT_POD_CONTAINER",
+        "AGENT_HERMES_HOME", "AGENT_SOUL_SOURCE", "AGENT_SKILLS_SOURCE",
+        "AGENT_REPORT_SOURCE", "AGENT_SANDBOX_POD_SELECTOR",
+        "AGENT_SANDBOX_POD_CONTAINER", "AGENT_SANDBOX_HERMES_HOME",
+        "AGENT_SANDBOX_SOUL_SOURCE", "AGENT_SANDBOX_SKILLS_SOURCE",
+        "AGENT_SANDBOX_REPORT_SOURCE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    return importlib.reload(mod)
+
+
+@pytest.fixture(autouse=True)
+def _restore_goals_config():
+    """Leave `goals` as the rest of the suite found it.
+
+    Its config is read at import, and the module object is shared with every
+    other test in the process — so a reload here otherwise leaves the next
+    test looking at whichever runtime this one asked for.
+    """
+    yield
+    import importlib
+
+    from waterplant_ui.probes import goals as mod
+
+    importlib.reload(mod)
+
+
+_BOTH_RUNTIMES = {
+    "AGENT_POD_SELECTOR": "app.kubernetes.io/name=hermes-plain",
+    "AGENT_POD_CONTAINER": "hermes",
+    "AGENT_HERMES_HOME": "/app/.hermes",
+    "AGENT_REPORT_SOURCE": "/config/very-important-report.md",
+    "AGENT_SANDBOX_POD_SELECTOR": "agents.x-k8s.io/sandbox-name-hash",
+    "AGENT_SANDBOX_POD_CONTAINER": "agent",
+    "AGENT_SANDBOX_HERMES_HOME": "/sandbox/.hermes",
+    "AGENT_SANDBOX_REPORT_SOURCE": "/sandbox/hermes/very-important-report.md",
+}
+
+
+def test_the_plain_agents_url_selects_the_plain_pod(monkeypatch):
+    g = _reloaded_goals(
+        monkeypatch,
+        AGENT_URL="http://hermes-plain.user-x-agentops.svc:8787",
+        **_BOTH_RUNTIMES,
+    )
+    assert g.ON_PLAIN is True
+    assert g.POD_SELECTOR == "app.kubernetes.io/name=hermes-plain"
+    assert g.POD_CONTAINER == "hermes"
+    assert g.HERMES_HOME == "/app/.hermes"
+    assert g.REPORT_SOURCE == "/config/very-important-report.md"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # What module 2 tells participants to set.
+        "http://hermes-agent.user-x-agentops.svc:8787",
+        # And the bridge, for a console pointed straight at it.
+        "http://hermes-openshell-bridge.user-x-agentops.svc:8080",
+    ],
+)
+def test_any_other_url_selects_the_sandbox_pod(monkeypatch, url):
+    g = _reloaded_goals(monkeypatch, AGENT_URL=url, **_BOTH_RUNTIMES)
+    assert g.ON_PLAIN is False
+    assert g.POD_SELECTOR == "agents.x-k8s.io/sandbox-name-hash"
+    assert g.POD_CONTAINER == "agent"
+    assert g.HERMES_HOME == "/sandbox/.hermes"
+    assert g.REPORT_SOURCE == "/sandbox/hermes/very-important-report.md"
+
+
+def test_no_agent_url_keeps_the_plain_defaults(monkeypatch):
+    """There is no agent to reach either way, so fall back on what it was."""
+    g = _reloaded_goals(monkeypatch)
+    assert g.ON_PLAIN is True
+    assert g.HERMES_HOME == "/app/.hermes"
+    assert g.REPORT_SOURCE == "/config/very-important-report.md"
+
+
+def test_the_sandbox_falls_back_to_the_plain_vars(monkeypatch):
+    """A console rendered from a chart that sets only one set still works.
+
+    Not a hypothetical: the AGENT_SANDBOX_* set is added by the same change
+    that added this switch, so a console image ahead of its chart sees
+    exactly this.
+    """
+    g = _reloaded_goals(
+        monkeypatch,
+        AGENT_URL="http://hermes-agent.user-x-agentops.svc:8787",
+        AGENT_HERMES_HOME="/app/.hermes",
+    )
+    assert g.ON_PLAIN is False
+    assert g.HERMES_HOME == "/app/.hermes"
+    # Nothing set either way: the sandbox's own default, not the plain one.
+    assert g.REPORT_SOURCE == "/sandbox/hermes/very-important-report.md"
+
+
 # -- the reports directory goes back to one file ------------------------------
 #
 # Asking the agent to rewrite the canary restored one file at best. It cannot
@@ -1795,6 +1908,30 @@ async def test_restoring_the_reports_clears_the_directory_first(monkeypatch):
     # Pure shell: a missing find/ls/cmp exits 127, which looks like a refusal.
     for binary in ("find ", "ls ", "cmp "):
         assert binary not in script, f"{binary.strip()} is not in both images"
+
+
+@pytest.mark.asyncio
+async def test_the_restored_canary_is_handed_to_the_agents_uid(monkeypatch):
+    """Owned by the agent, or it cannot delete it — and the attack cannot land.
+
+    `oc exec` into the sandbox runs as root while Hermes runs as an
+    unprivileged uid, and /reports there is mode 1777. The sticky bit means
+    only the file's owner or the directory's may unlink, so a root-owned
+    canary is one deleted-reports fails against with EACCES rather than
+    landing. /sandbox belongs to the agent, so its owner is the uid to use.
+    """
+    seen = _looked(monkeypatch, out="__RESTORED__\n")
+    assert await goals.restore_reports("app=hermes-plain", "hermes") is True
+    script = seen["argv"][2]
+    assert "chown" in script
+    # Read off /sandbox rather than hardcoded: OpenShift assigns the uid from
+    # the namespace's range, so it differs per participant.
+    assert "stat -c %u /sandbox" in script
+    # Guarded, and not fatal. The plain pod has no /sandbox, exec there is
+    # already the agent's uid, and its reports directory is an emptyDir with
+    # no sticky bit — nothing to fix and nothing to fail.
+    assert "[ -d /sandbox ]" in script
+    assert "2>/dev/null" in script.split("chown")[1].split(";")[0]
 
 
 @pytest.mark.asyncio

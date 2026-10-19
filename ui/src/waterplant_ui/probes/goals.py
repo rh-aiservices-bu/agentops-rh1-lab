@@ -26,6 +26,7 @@ import os
 
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -208,27 +209,88 @@ _FS_CONTAINS_PROMPT = (
 OC_TIMEOUT_S = float(os.environ.get("OC_EXEC_TIMEOUT_S", "20"))
 
 REPORTS_DIR = "/reports"
-HERMES_HOME = os.environ.get("AGENT_HERMES_HOME", "/app/.hermes")
+
+
+def on_plain() -> bool:
+    """Is the console pointed at the plain Hermes, or at the sandbox?
+
+    Decided from AGENT_URL, because AGENT_URL is the thing that actually
+    moves. Module 2 has participants `oc set env` it over to the sandboxed
+    agent, and the chart's own switch for this was evaluated at render time
+    and could not follow them — so the console went on exec'ing into
+    hermes-plain while it was talking to hermie, and every reset restored the
+    wrong pod's files. Observed on cluster-zwtpw: AGENT_URL naming
+    hermes-agent with AGENT_POD_SELECTOR still naming hermes-plain, which is
+    the regression ui.yaml's own header records having fixed once before.
+
+    Only hermes-plain's own Service names the plain agent. Everything else —
+    the bridge, the relay, hermes-agent — reaches the sandbox.
+
+    No AGENT_URL at all reads as plain, which is what this module defaulted
+    to before the switch existed. There is no agent to reach either way (the
+    engine is not even built without one), so the question is only which
+    defaults a misconfigured console falls back on, and the answer should be
+    the one it has always used.
+    """
+    host = urlparse(os.environ.get("AGENT_URL", "")).hostname or ""
+    if not host:
+        return True
+    return host.split(".")[0] == "hermes-plain"
+
+
+#: Fixed at import, like every other value in this block. AGENT_URL changes
+#: by `oc set env`, which rolls the Deployment, so the process that read it
+#: never sees it change underneath itself.
+ON_PLAIN = on_plain()
+
+
+def _runtime(name: str, plain: str, sandbox: str) -> str:
+    """One of the two runtimes' values for a path, by what AGENT_URL names.
+
+    ui.yaml sets both sets unconditionally — AGENT_<name> for the plain
+    Hermes, AGENT_SANDBOX_<name> for the sandbox — precisely so this choice
+    can be made here, at runtime, rather than in a template that cannot know
+    where the console will be pointed later.
+
+    The sandbox falls back to the plain var before its own default, so a
+    console deployed from an older chart that sets only one set still finds
+    something rather than reaching for a path that runtime does not have.
+    """
+    if ON_PLAIN:
+        return os.environ.get(f"AGENT_{name}", plain)
+    return os.environ.get(
+        f"AGENT_SANDBOX_{name}", os.environ.get(f"AGENT_{name}", sandbox)
+    )
+
+
+#: Which pod holds the agent's filesystem, and which container in it. The
+#: sandbox's pod is created by the participant partway through the lab and is
+#: named for the sandbox, so it is matched by label rather than by name.
+POD_SELECTOR = _runtime("POD_SELECTOR", "", "")
+POD_CONTAINER = _runtime("POD_CONTAINER", "", "")
+
+HERMES_HOME = _runtime("HERMES_HOME", "/app/.hermes", "/sandbox/.hermes")
 
 #: The pristine lab soul, already in the agent's pod and read-only to it.
 #: Plain mounts the hermes-plain-soul ConfigMap at /soul; the sandbox keeps
 #: the copy the bridge uploaded. Restoring from there rather than from git
 #: means a participant who edits the ConfigMap keeps their edit — only the
 #: attack's tampering is undone.
-SOUL_SOURCE = os.environ.get("AGENT_SOUL_SOURCE", "/soul/SOUL.md")
+SOUL_SOURCE = _runtime("SOUL_SOURCE", "/soul/SOUL.md", "/sandbox/hermes/SOUL.md")
 
 #: The pristine skills, and reseed-skills.sh beside them. Plain mounts the
 #: hermes-plain ConfigMap read-only at /config; the sandbox keeps the copy the
 #: bridge uploaded to /sandbox/hermes. Both publish the same three flat
-#: filenames, so only the directory differs between the runtimes — which is
-#: why one env var is enough, exactly as with the soul above.
-SKILLS_SOURCE = os.environ.get("AGENT_SKILLS_SOURCE", "/config")
+#: filenames, so only the directory differs between the runtimes.
+SKILLS_SOURCE = _runtime("SKILLS_SOURCE", "/config", "/sandbox/hermes")
 
 #: The pristine always-present report, published beside the skills. Same
 #: directory as SKILLS_SOURCE in both runtimes, named separately because this
 #: one is a file rather than a directory and a lab author may want to move it.
-REPORT_SOURCE = os.environ.get(
-    "AGENT_REPORT_SOURCE", "/config/very-important-report.md"
+REPORT_SOURCE = _runtime(
+    "REPORT_SOURCE",
+    "/config/very-important-report.md",
+    "/sandbox/hermes/very-important-report.md",
 )
 
 
@@ -321,13 +383,27 @@ async def restore_reports(selector: str, container: str) -> bool:
         return False
     rc, out = await _oc_exec(pod, container, [
         "sh", "-c",
-        # Clear, restore, then verify both halves: the canary matches the
-        # pristine copy, and nothing else is left. Pure shell — no cp -u, no
-        # find, no ls, no cmp — because neither image ships more than the
-        # basics and a missing binary exits 127 while looking like a refusal.
+        # Clear, restore, hand it to the agent, then verify both halves: the
+        # canary matches the pristine copy, and nothing else is left. Pure
+        # shell — no cp -u, no find, no ls, no cmp — because neither image
+        # ships more than the basics and a missing binary exits 127 while
+        # looking like a refusal.
         'mkdir -p "$2" 2>/dev/null; '
         'for f in "$2"/*; do [ -e "$f" ] && rm -rf "$f"; done; '
         'cp "$1" "$2/$3" || exit 1; '
+        # The copy lands owned by whoever exec'd, and in the sandbox that is
+        # root while the agent runs as an unprivileged uid. /reports there is
+        # mode 1777 — sticky — so under it only the file's owner or the
+        # directory's can unlink: a root-owned canary is one the agent cannot
+        # delete even once module 4 grants it the path, and deleted-reports
+        # would fail with EACCES instead of landing. /sandbox is the agent's
+        # own, so its owner is the uid to hand the file to.
+        #
+        # Best effort and deliberately not fatal: on the plain pod there is
+        # no /sandbox, exec is already the agent's uid, and the reports
+        # directory is an emptyDir with no sticky bit — nothing to fix.
+        'if [ -d /sandbox ]; then u=$(stat -c %u /sandbox 2>/dev/null); '
+        '[ -n "$u" ] && chown "$u" "$2/$3" 2>/dev/null; fi; '
         '[ "$(cat "$1")" = "$(cat "$2/$3")" ] || exit 1; '
         'for f in "$2"/*; do [ -e "$f" ] || continue; '
         'case "${f##*/}" in "$3") continue ;; *) exit 1 ;; esac; done; '

@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 
 from . import guardrails, harness, traces
 from .probes import engine as probe_engine
+from .probes import goals as probe_goals
 from .probes import loader as probe_loader
 from .probes import events as probe_events
 from .probes import mlflow_run, scheduler
@@ -81,8 +82,14 @@ DOCS_URL = os.environ.get("DOCS_URL", "")
 #: tampered file are measured rather than reported by the agent under test.
 #: The console execs into this pod and looks. Unset, it falls back to asking
 #: the agent and labels the verdict as reported.
-AGENT_POD_SELECTOR = os.environ.get("AGENT_POD_SELECTOR", "")
-AGENT_POD_CONTAINER = os.environ.get("AGENT_POD_CONTAINER", "")
+#:
+#: Read from `goals` rather than straight out of the environment, because
+#: which of the two runtimes' pods this is depends on where AGENT_URL points
+#: and that choice is made in one place — see `goals.on_plain`. Reading
+#: AGENT_POD_SELECTOR here directly is how the console came to exec into
+#: hermes-plain while chatting with the sandbox.
+AGENT_POD_SELECTOR = probe_goals.POD_SELECTOR
+AGENT_POD_CONTAINER = probe_goals.POD_CONTAINER
 
 STATIC = Path(__file__).parent / "static"
 
