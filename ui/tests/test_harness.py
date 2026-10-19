@@ -220,23 +220,23 @@ async def _streams_with_tools(request):
     async def gen():
         yield chunk("Let me check pump 4. ").encode()
         yield progress({
-            "tool": "telemetry_read_pump", "emoji": "🔧",
+            "tool": "mcp_gateway_telemetry_read_pump", "emoji": "🔧",
             "label": "read_pump(4)", "toolCallId": "call_1", "status": "running",
         }).encode()
         yield progress({
-            "tool": "telemetry_read_pump", "toolCallId": "call_1",
+            "tool": "mcp_gateway_telemetry_read_pump", "toolCallId": "call_1",
             "status": "completed",
         }).encode()
         # Prose between two tools, which is what used to tear the waiting
         # indicator down mid-turn.
         yield chunk("It is out of limits. ").encode()
         yield progress({
-            "tool": "maintenance_raise_work_order", "emoji": "📋",
+            "tool": "mcp_gateway_maintenance_raise_work_order", "emoji": "📋",
             "label": "raise_work_order(pump-4)", "toolCallId": "call_2",
             "status": "running",
         }).encode()
         yield progress({
-            "tool": "maintenance_raise_work_order", "toolCallId": "call_2",
+            "tool": "mcp_gateway_maintenance_raise_work_order", "toolCallId": "call_2",
             "status": "completed",
         }).encode()
         yield chunk("Work order raised.").encode()
@@ -329,9 +329,13 @@ async def test_hermes_tool_frames_become_tool_events(openai):
 
     calls = [e for e in evs if e["type"] == "tool_call"]
     assert [c["name"] for c in calls] == [
-        "telemetry_read_pump", "maintenance_raise_work_order",
+        "mcp_gateway_telemetry_read_pump",
+        "mcp_gateway_maintenance_raise_work_order",
     ]
-    # The server each tool belongs to, read off its prefix.
+    # The server each tool belongs to, found anywhere in the name — these
+    # arrive three names deep (`mcp_` + the MCP server Hermes reached it
+    # through + the server behind the gateway), so matching only the first
+    # segment labelled every one of them "local".
     assert [c["server"] for c in calls] == ["telemetry", "maintenance"]
     # Hermes' own rendered preview, which is more use on screen than the name.
     assert calls[0]["preview"] == "read_pump(4)"
@@ -355,14 +359,15 @@ async def test_a_preview_that_is_only_the_tool_name_is_dropped(openai):
 
     `build_tool_preview` picks a primary argument by name, from a table of
     Hermes' own tools plus a few common keys. An MCP tool matches neither —
-    `telemetry_read_pump` takes `pump_id` — so the agent sends the tool name
-    as the label, and passing that through rendered the name twice.
+    `mcp_gateway_control_start_pump` takes `pump_id` — so the agent sends the
+    tool name as the label, and passing that through rendered the name twice.
     """
 
     async def gen_stream(request):
         async def gen():
             payload = {
-                "tool": "telemetry_read_pump", "label": "telemetry_read_pump",
+                "tool": "mcp_gateway_control_start_pump",
+                "label": "mcp_gateway_control_start_pump",
                 "toolCallId": "call_1", "status": "running",
             }
             yield f"event: hermes.tool.progress\ndata: {json.dumps(payload)}\n\n".encode()

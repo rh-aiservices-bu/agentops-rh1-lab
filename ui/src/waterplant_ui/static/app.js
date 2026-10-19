@@ -1073,6 +1073,37 @@ async function ask(event) {
   let replyLine = null;
   let replyText = "";
   let blocked = false;
+  /* Whether this turn has already been labelled.
+   *
+   * Exactly one "assistant: " per turn, on whichever line the turn produces
+   * first. Everything a turn emits — the tool calls as much as the prose — is
+   * the assistant, so the label belongs at the top of the lot and nowhere
+   * else.
+   *
+   * Two readings of this were wrong in turn. Tagging every prose paragraph
+   * put a second label mid-answer, because a tool call ends the current prose
+   * run and an agent that talks, acts, then talks again writes two
+   * paragraphs. Tagging the first *paragraph* then put the label underneath
+   * the tool calls whenever the agent acted before it spoke, which is most of
+   * the interesting turns. */
+  let taggedReply = false;
+  /* Whether the paragraph being written is still empty, for the whitespace
+   * trim in write(). */
+  let replyBlank = false;
+
+  /* Put the turn's one label at the front of this line, if it has not been
+   * placed yet. Also takes it off the activity indicator, which carries it
+   * until there is real output to carry it instead — so there is never more
+   * than one on screen. */
+  const tagTurn = (el) => {
+    if (taggedReply) return;
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.textContent = "assistant: ";
+    el.insertBefore(tag, el.firstChild);
+    taggedReply = true;
+    pendingLine?.querySelector(".tag")?.remove();
+  };
 
   const write = (text) => {
     const pinned = isPinned(chat);
@@ -1080,13 +1111,29 @@ async function ask(event) {
       chat.querySelector(".cursor-line")?.remove();
       replyLine = document.createElement("p");
       replyLine.className = "line agent";
-      const tag = document.createElement("span");
-      tag.className = "tag";
-      tag.textContent = "assistant: ";
-      replyLine.appendChild(tag);
+      tagTurn(replyLine);
       chat.insertBefore(replyLine, pendingAnchor());
+      replyBlank = true;
     }
-    replyLine.appendChild(document.createTextNode(text));
+    /* Leading whitespace is dropped until the paragraph has some text in it.
+     * `.line` is `white-space: pre-wrap`, and a model resuming after a tool
+     * call opens with the blank line that separated its paragraphs — which
+     * rendered as an empty gap under the tag.
+     *
+     * Held as state rather than tested on this one chunk, because the stream
+     * is token-by-token: "\n\n" routinely arrives as a delta of its own, and
+     * trimming only the chunk that opened the paragraph would leave the
+     * blank line in whenever it came in the next one.
+     *
+     * Stripped for display and not from `replyText`: that is what gets
+     * remembered as what the agent said, and losing the paragraph break
+     * there would run the two halves of the answer together. */
+    let shown = text;
+    if (replyBlank) {
+      shown = text.replace(/^\s+/, "");
+      if (shown) replyBlank = false;
+    }
+    if (shown) replyLine.appendChild(document.createTextNode(shown));
     replyText += text;
     stick(chat, pinned);
   };
@@ -1102,6 +1149,11 @@ async function ask(event) {
     const el = document.createElement("p");
     el.className = `line trace ${cls}`;
     el.textContent = text;
+    /* After the className and textContent, and after the showTrace check
+     * above: a line that is never rendered must not take the turn's label
+     * with it. With the trace pane off, the first prose paragraph is the
+     * first visible output and gets it instead. */
+    tagTurn(el);
     // A status line can carry somewhere to go — the harness that cannot show a
     // tool trace here traces it to MLflow instead. Appended as a real anchor so
     // it is clickable; the href is our own config, never model output.

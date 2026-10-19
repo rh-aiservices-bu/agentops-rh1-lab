@@ -102,22 +102,30 @@ _TRACE_FOUND_LINK = "see the trace →"
 #: documented on `_tool_progress_events` below.
 _TOOL_PROGRESS = "hermes.tool.progress"
 
-#: The MCP servers behind this participant's gateway. Tool names arrive
-#: prefixed with the server that owns them — `telemetry_read_pump`,
-#: `control_set_pump` — which is the one piece of routing information the
-#: frame gives us for free.
-_MCP_PREFIXES = ("telemetry", "maintenance", "control")
+#: The MCP servers behind this participant's gateway. Each gateway tool name
+#: carries the server that owns it, which is the one piece of routing
+#: information the frame gives us for free.
+_MCP_SERVERS = ("telemetry", "maintenance", "control")
 
 
 def _server_for(tool: str) -> str:
     """Which server a tool name belongs to.
 
-    "local" rather than "unknown" for the rest: a tool with no MCP prefix is
-    one of Hermes' own (terminal, file, skills, web), which is a fact about
-    it and not an absence of one.
+    Matched on any segment, not on the head. Hermes prefixes a tool with the
+    MCP server it reached it through, and the gateway has already prefixed it
+    with the server behind *that*, so what actually arrives is
+    `mcp_gateway_control_start_pump` — three names deep. Reading only the
+    first segment called every gateway tool "local", which is the opposite of
+    true.
+
+    "local" rather than "unknown" for the rest: a tool with no MCP server in
+    its name is one of Hermes' own (terminal, file, skills, web), which is a
+    fact about it and not an absence of one.
     """
-    head = tool.split("_", 1)[0]
-    return head if head in _MCP_PREFIXES else "local"
+    for part in tool.split("_"):
+        if part in _MCP_SERVERS:
+            return part
+    return "local"
 
 
 def _preview(tool: str, label: Any) -> str:

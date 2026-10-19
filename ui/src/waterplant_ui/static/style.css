@@ -625,6 +625,11 @@ body {
 .line.trace { font-size: calc(1.06rem / var(--ui-scale)); letter-spacing: .01em; margin-bottom: 3px; }
 .line.trace.dim  { color: var(--phos-dim); }
 .line.trace.call { color: var(--phos); text-shadow: 0 0 6px rgba(var(--phos-glow), .5); }
+/* The turn's one "assistant:" label lands on whichever line the turn
+   produces first, which is a tool call whenever the agent acts before it
+   speaks. Styled like the label on a prose line rather than like the tool
+   call it is sitting in, so it reads the same wherever it lands. */
+.line.trace .tag { color: var(--phos-dim); text-shadow: none; }
 .line.trace.ok   { color: var(--phos-dim); padding-left: 1.4em; }
 .line.trace.err  { color: #ff8b4a; padding-left: 1.4em; text-shadow: 0 0 8px rgba(255,107,42,.45); }
 /* A status line's link out (harness traces its tool calls elsewhere). Brighter
