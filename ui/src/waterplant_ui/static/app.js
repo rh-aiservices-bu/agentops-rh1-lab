@@ -501,23 +501,28 @@ function handleProbeEvent(ev) {
    * on-screen transcript rather than keeping a session of its own. */
   if (ev.kind === "turn") {
     if (ev.session && ev.session !== conversationId) conversationId = ev.session;
-    addMessage(ev.role, ev.text, ev.persona);
+    const line = addMessage(ev.role, ev.text, ev.persona);
     if (ev.role !== "system") remember(ev.role, ev.text);
-    /* The same waiting indicator a typed turn gets. An attack's prompt lands
+    /* The same activity indicator a typed turn gets. An attack's prompt lands
      * in the transcript and then nothing moves for however long the agent
      * takes — which, for an attack that drives a tool chain, is the longest
      * wait in the console and the one most likely to read as a hang. It was
      * only wired into the chat form, so the path a participant watches most
-     * closely was the one path without it. */
+     * closely was the one path without it.
+     *
+     * These turns are polled rather than streamed, so there are no tool
+     * frames to label it with: it reads "thinking" throughout. */
     if (ev.role === "user") {
       startPending();
     } else {
       stopPending();
       /* Tagged with its session so the trace event can find this line again
-       * and append the link, the same way a typed turn ends with one. */
-      if (ev.role === "assistant" && ev.session) {
-        const last = $("chat").lastElementChild;
-        if (last) last.dataset.session = ev.session;
+       * and append the link, the same way a typed turn ends with one. The
+       * line addMessage just made, not chat.lastElementChild — the indicator
+       * sits after it until stopPending above takes it away, and reaching for
+       * the last child tagged that instead. */
+      if (ev.role === "assistant" && ev.session && line) {
+        line.dataset.session = ev.session;
       }
     }
     return;
@@ -841,9 +846,16 @@ function addMessage(role, text, persona) {
     line.appendChild(t);
   }
   line.appendChild(document.createTextNode(text));
-  chat.appendChild(line);
+  /* Above the activity indicator while a turn is in flight, so an echoed
+   * probe turn does not land underneath it. */
+  chat.insertBefore(line, pendingAnchor());
 
   stick(chat, pinned);
+  /* Returned so a caller that needs to annotate the line it just added can
+   * hold on to it. It used to reach for chat.lastElementChild, which is only
+   * the new line while nothing else is appended after it — and the activity
+   * indicator now is. */
+  return line;
 }
 
 /* The conversation, as the console remembers it.
@@ -888,10 +900,10 @@ function clearTranscript(reason) {
   );
 }
 
-/* What the console shows while the agent is thinking.
+/* What the console shows while the agent has the floor.
  *
  * A blinking block on its own line, which is what this screen already uses
- * for "the machine has the floor" — and the reason it was taken off the foot
+ * for "the machine is working" — and the reason it was taken off the foot
  * of a *finished* answer, where it read as "still going". Here that reading
  * is the correct one.
  *
@@ -901,10 +913,43 @@ function clearTranscript(reason) {
  * without a number on screen those look identical and the participant's only
  * move is to reload and lose the conversation.
  *
- * Torn down by the first thing the agent produces — a token, a tool call, or
- * an error — so it never overlaps real output.
+ * It lives for the whole turn and says what the agent is doing right now:
+ * the running tool while there is one, "thinking" between them.
+ *
+ * It used to be torn down by the first thing the agent produced — any token,
+ * any tool call, any status line. On a turn that reasons out loud before
+ * acting ("I should check pump 4 first…") that is the *opening* words, so
+ * the indicator vanished seconds in and the remaining minute of tool calls
+ * ran with nothing on screen moving. Worse, the opening status line this
+ * harness emits before the upstream request had even been made killed it
+ * within milliseconds. The agent is not finished because it has started
+ * talking, so nothing below tears this down except the end of the turn.
+ *
+ * Everything written during a turn is inserted *before* this line rather
+ * than appended, which is what keeps it at the foot of the transcript
+ * without having to move it.
  */
 let pendingTimer = null;
+let pendingLine = null;
+/* The indicator's own render function, held so a tool frame can repaint the
+ * label the moment it arrives instead of waiting up to a second for the next
+ * interval tick. */
+let pendingTick = null;
+/* Tool calls started and not yet finished, oldest first. A list and not a
+ * single name because Hermes can have more than one call outstanding, and
+ * because the frames are correlated by id: tracking them properly is what
+ * lets the label fall back to the *previous* tool rather than to "thinking"
+ * when one of two finishes. */
+let pendingTools = [];
+
+/* Where in the transcript new output goes: above the activity line while
+ * there is one, at the end otherwise. insertBefore(el, null) is appendChild,
+ * so the null case needs no branch — but a line already removed from the DOM
+ * would throw, hence the parent check. */
+function pendingAnchor() {
+  const chat = $("chat");
+  return pendingLine && pendingLine.parentNode === chat ? pendingLine : null;
+}
 
 function startPending() {
   stopPending();
@@ -923,17 +968,50 @@ function startPending() {
   wait.className = "wait";
   line.append(tag, cursor, wait);
   chat.appendChild(line);
+  pendingLine = line;
+  pendingTools = [];
   stick(chat, pinned);
 
   const started = Date.now();
   const tick = () => {
     const s = Math.round((Date.now() - started) / 1000);
-    // Silent for the first couple of seconds: a fast answer should not flash
-    // a timer on its way past.
-    wait.textContent = s >= 2 ? `  thinking… ${s}s` : "";
+    /* The tool currently running, by name. The most recent of several, which
+     * is the one a participant just watched appear in the trace pane.
+     *
+     * Hermes' own preview is deliberately not used here: it carries
+     * arguments, and the label has to stay short enough to sit on one line
+     * next to a counter. The preview is in the trace line above. */
+    const tool = pendingTools.length
+      ? pendingTools[pendingTools.length - 1].name
+      : "";
+    const what = tool ? `${tool}…` : "thinking…";
+    /* Silent for the first couple of seconds: a fast answer should not flash
+     * a timer on its way past. A named tool shows at once — it is new
+     * information rather than a reminder that time is passing. */
+    wait.textContent = tool || s >= 2 ? `  ${what} ${s}s` : "";
   };
   tick();
+  pendingTick = tick;
   pendingTimer = setInterval(tick, 1000);
+}
+
+/* A tool started or finished. Both are no-ops outside a turn: a stray frame
+ * must not conjure an indicator that nothing will ever take down. */
+function pendingToolStarted(name, callId) {
+  if (!pendingLine) return;
+  pendingTools.push({ name, callId: callId || "" });
+  pendingTick?.();
+}
+
+function pendingToolDone(name, callId) {
+  if (!pendingLine) return;
+  /* By id where there is one, so two calls to the same tool do not clear
+   * each other. By name as the fallback, for a harness that sends no ids. */
+  const i = callId
+    ? pendingTools.findIndex((t) => t.callId === callId)
+    : pendingTools.findIndex((t) => t.name === name);
+  if (i !== -1) pendingTools.splice(i, 1);
+  pendingTick?.();
 }
 
 function stopPending() {
@@ -941,6 +1019,9 @@ function stopPending() {
     clearInterval(pendingTimer);
     pendingTimer = null;
   }
+  pendingLine = null;
+  pendingTick = null;
+  pendingTools = [];
   $("chat")?.querySelector(".line.pending")?.remove();
 }
 
@@ -994,7 +1075,6 @@ async function ask(event) {
   let blocked = false;
 
   const write = (text) => {
-    stopPending();
     const pinned = isPinned(chat);
     if (!replyLine) {
       chat.querySelector(".cursor-line")?.remove();
@@ -1004,7 +1084,7 @@ async function ask(event) {
       tag.className = "tag";
       tag.textContent = "assistant: ";
       replyLine.appendChild(tag);
-      chat.appendChild(replyLine);
+      chat.insertBefore(replyLine, pendingAnchor());
     }
     replyLine.appendChild(document.createTextNode(text));
     replyText += text;
@@ -1012,9 +1092,10 @@ async function ask(event) {
   };
 
   const trace = (cls, text, link) => {
-    // Stopped even when the trace pane is off: a tool call means the agent is
-    // no longer thinking, whether or not this participant is watching them.
-    stopPending();
+    /* The activity indicator is deliberately NOT stopped here. A tool call
+     * means the agent is busy, not that it is finished — the old reading of
+     * this ("no longer thinking") is what left the console motionless for
+     * the rest of a multi-tool turn. */
     if (!showTrace) return;
     const pinned = isPinned(chat);
     chat.querySelector(".cursor-line")?.remove();
@@ -1033,7 +1114,7 @@ async function ask(event) {
       a.textContent = link.text;
       el.appendChild(a);
     }
-    chat.appendChild(el);
+    chat.insertBefore(el, pendingAnchor());
     stick(chat, pinned);
     replyLine = null; // a tool call ends the current prose run
   };
@@ -1086,11 +1167,22 @@ async function ask(event) {
           const body = ev.message ? `· ${ev.message}` : "·";
           trace(ev.level === "bad" ? "err" : "dim", body, ev.link);
         } else if (ev.type === "tool_call") {
+          pendingToolStarted(ev.name, ev.callId);
+          /* Arguments where the harness sends them; Hermes sends a rendered
+           * preview instead, which is the same information already shaped
+           * for a human. Either way the name alone is the fallback. */
           const args = Object.entries(ev.arguments || {})
             .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
             .join(" ");
-          trace("call", `→ ${ev.name}${args ? " " + args : ""}`);
+          const detail = args || ev.preview || "";
+          trace("call", `→ ${ev.name}${detail ? " " + detail : ""}`);
+        } else if (ev.type === "tool_done") {
+          /* No trace line: the event carries no result, only the fact that
+           * the call ended. Its whole job is to stop the indicator naming a
+           * tool that has finished. */
+          pendingToolDone(ev.name, ev.callId);
         } else if (ev.type === "tool_result") {
+          pendingToolDone(ev.name, ev.callId);
           if (ev.ok) {
             trace("ok", `  ${ev.summary}`);
           } else {

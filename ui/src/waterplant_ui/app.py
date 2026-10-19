@@ -175,7 +175,7 @@ async def config() -> dict[str, Any]:
         # to switch persona should be able to see when the deployed harness
         # cannot honour that, instead of concluding the exercise is broken.
         "agentHarness": harness.PROTOCOL,
-        "agentTraceAvailable": harness.PROTOCOL == "waterplant",
+        "agentTraceAvailable": harness.tool_trace_available(),
         "identityPropagated": harness.identity_is_propagated(),
         # Whether a prompt is checked before the agent is asked. Reported for
         # the same reason as the two above: a participant looking for the

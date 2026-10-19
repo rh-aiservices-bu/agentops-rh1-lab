@@ -202,6 +202,49 @@ async def _streams(request):
     return StreamingResponse(gen(), media_type="text/event-stream")
 
 
+async def _streams_with_tools(request):
+    """Hermes' real stream shape: OpenAI chunks plus its own tool frames.
+
+    Byte-for-byte what the agent image writes — `event:` on its own line, the
+    payload on the next, a blank line between frames — because the whole bug
+    this exercises was a parser that read `data:` lines and ignored which
+    frame they belonged to.
+    """
+
+    def chunk(piece):
+        return f'data: {json.dumps({"choices": [{"delta": {"content": piece}}]})}\n\n'
+
+    def progress(payload):
+        return f"event: hermes.tool.progress\ndata: {json.dumps(payload)}\n\n"
+
+    async def gen():
+        yield chunk("Let me check pump 4. ").encode()
+        yield progress({
+            "tool": "telemetry_read_pump", "emoji": "🔧",
+            "label": "read_pump(4)", "toolCallId": "call_1", "status": "running",
+        }).encode()
+        yield progress({
+            "tool": "telemetry_read_pump", "toolCallId": "call_1",
+            "status": "completed",
+        }).encode()
+        # Prose between two tools, which is what used to tear the waiting
+        # indicator down mid-turn.
+        yield chunk("It is out of limits. ").encode()
+        yield progress({
+            "tool": "maintenance_raise_work_order", "emoji": "📋",
+            "label": "raise_work_order(pump-4)", "toolCallId": "call_2",
+            "status": "running",
+        }).encode()
+        yield progress({
+            "tool": "maintenance_raise_work_order", "toolCallId": "call_2",
+            "status": "completed",
+        }).encode()
+        yield chunk("Work order raised.").encode()
+        yield b"data: [DONE]\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
 async def _ignores_stream(request):
     return JSONResponse({"choices": [{"message": {"content": "one shot"}}]})
 
@@ -264,10 +307,91 @@ async def test_stream_translates_to_console_events(openai):
     async with stub(_streams) as client:
         evs = await events(openai, client)
     assert [e["type"] for e in evs] == ["status", "token", "token", "token", "done"]
-    # The opening status is what stops an empty trace panel reading as a broken
-    # console: Hermes loops server-side, so the tool calls never cross the wire.
-    assert "does not expose tool calls" in evs[0]["message"]
+    # The opening status says what is missing on a deployment with no trace
+    # lookup wired. It no longer claims the tool calls are missing too —
+    # Hermes sends them on its own frames and the stream forwards them.
+    assert "no MLflow trace is wired up here" in evs[0]["message"]
     assert "".join(e["text"] for e in evs if e["type"] == "token") == REPLY
+
+
+@pytest.mark.asyncio
+async def test_hermes_tool_frames_become_tool_events(openai):
+    """The tool names were always on the wire; now they reach the browser.
+
+    Hermes loops server-side, so `delta.tool_calls` is empty and the only
+    record of what it did is its own `hermes.tool.progress` frames. The old
+    parser read every `data:` line as an OpenAI chunk, so these failed the
+    `["choices"]` lookup and were dropped — the agent-trace panel sat empty
+    on the one path module 6 asks participants to debug from.
+    """
+    async with stub(_streams_with_tools) as client:
+        evs = await events(openai, client)
+
+    calls = [e for e in evs if e["type"] == "tool_call"]
+    assert [c["name"] for c in calls] == [
+        "telemetry_read_pump", "maintenance_raise_work_order",
+    ]
+    # The server each tool belongs to, read off its prefix.
+    assert [c["server"] for c in calls] == ["telemetry", "maintenance"]
+    # Hermes' own rendered preview, which is more use on screen than the name.
+    assert calls[0]["preview"] == "read_pump(4)"
+
+    # One completion per call, correlated by id, carrying no verdict: the
+    # frame says the call finished and not whether it worked, and an invented
+    # "ok" would have the console vouch for an outcome it never saw.
+    done = [e for e in evs if e["type"] == "tool_done"]
+    assert [d["callId"] for d in done] == ["call_1", "call_2"]
+    assert all("ok" not in d and "summary" not in d for d in done)
+
+    # The prose still arrives, in order, around them.
+    assert "".join(e["text"] for e in evs if e["type"] == "token") == (
+        "Let me check pump 4. It is out of limits. Work order raised."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_preview_that_is_only_the_tool_name_is_dropped(openai):
+    """Hermes falls back to the name when it cannot preview the arguments.
+
+    `build_tool_preview` picks a primary argument by name, from a table of
+    Hermes' own tools plus a few common keys. An MCP tool matches neither —
+    `telemetry_read_pump` takes `pump_id` — so the agent sends the tool name
+    as the label, and passing that through rendered the name twice.
+    """
+
+    async def gen_stream(request):
+        async def gen():
+            payload = {
+                "tool": "telemetry_read_pump", "label": "telemetry_read_pump",
+                "toolCallId": "call_1", "status": "running",
+            }
+            yield f"event: hermes.tool.progress\ndata: {json.dumps(payload)}\n\n".encode()
+            yield b"data: [DONE]\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    async with stub(gen_stream) as client:
+        evs = await events(openai, client)
+    call = [e for e in evs if e["type"] == "tool_call"][0]
+    assert call["preview"] == ""
+
+
+@pytest.mark.asyncio
+async def test_a_tool_frame_is_not_parsed_as_a_chunk(openai):
+    """Ordering is the point: a tool frame must not reach the chunk parser.
+
+    `event:` scopes to one frame. Were it not cleared on the blank line that
+    ends a frame, the chunk that follows a tool call would be read as another
+    tool frame and its text would vanish from the answer.
+    """
+    async with stub(_streams_with_tools) as client:
+        evs = await events(openai, client)
+    kinds = [e["type"] for e in evs if e["type"] != "status"]
+    assert kinds == [
+        "token", "tool_call", "tool_done",
+        "token", "tool_call", "tool_done",
+        "token", "done",
+    ]
 
 
 @pytest.mark.asyncio
@@ -391,7 +515,7 @@ async def test_no_trace_status_omits_the_link_when_untraced(openai_untraced):
     that goes nowhere."""
     async with stub(_streams) as client:
         evs = await events(openai_untraced, client)
-    assert "does not expose tool calls" in evs[0]["message"]
+    assert "no MLflow trace is wired up here" in evs[0]["message"]
     assert "link" not in evs[0]
 
 

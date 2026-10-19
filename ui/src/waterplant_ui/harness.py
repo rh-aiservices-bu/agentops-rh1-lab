@@ -16,22 +16,30 @@ on this path the BFF substitutes a service credential and the caller's identity
 does not reach the agent. That is a real reduction in what the lab can
 demonstrate, not an implementation detail — see `identity_is_propagated`.
 
-**There is no tool trace in the OpenAI shape.** Hermes runs its agent loop
-server-side and the completion carries only the finished answer. (Its stream
-does add a non-standard `event: hermes.tool.progress` frame per tool call, seen
-on cluster-z5jhc; this module does not read it yet.) The console's agent-trace
-panel therefore has nothing to render, which matters
-because module 6 has participants debug an over-restrictive policy *from the
-trace*. Rather than show an empty panel that reads as a broken console, the
-stream opens with a status line saying so.
+**Tool calls are not in the OpenAI shape, but Hermes sends them anyway.** It
+runs its agent loop server-side and the completion carries only the finished
+answer, so `delta.tool_calls` stays empty. Alongside those chunks, though, its
+stream carries a non-standard `event: hermes.tool.progress` frame per tool
+call — one when the call starts, one when it finishes — and `stream` reads them
+into this console's own `tool_call` / `tool_done` events.
 
-They are not lost, though — Hermes's `hermes_otel` plugin exports them to MLflow
-as `TOOL` spans. So the turn ends with a link to its *own* trace, resolved by
-`traces.py` after the answer, and falls back to MLflow's front door when the
-lookup cannot pin one. That is still a redirect rather than a fix: the
-participant leaves the console to read it. Rendering those spans in the panel is
-the next step, and tracing at the gateway — where it survives a harness swap —
-is the durable one.
+This module used to drop them. The loop kept every line beginning `data:` and
+parsed each as an OpenAI chunk, so a tool frame failed the `["choices"]` lookup
+and was discarded one hop before the browser: the tool names were on the wire
+the whole time and the agent-trace panel sat empty. That mattered most in
+module 6, where participants debug an over-restrictive policy *from the trace*.
+
+What is still absent is the tool *result*. The completed frame carries the tool
+and its call id and nothing else, so `tool_done` deliberately carries no
+verdict — a fabricated "ok" would have the console vouch for an outcome it
+never saw. Results live in MLflow, where Hermes's `hermes_otel` plugin exports
+every call as a `TOOL` span, and the turn ends with a link to its own trace
+resolved by `traces.py`. Tracing at the gateway — where it would survive a
+harness swap — is still the durable answer.
+
+A different OpenAI-compatible server will not send these frames, and nothing
+here pretends otherwise: no frames simply means no tool lines, exactly as
+before.
 """
 
 from __future__ import annotations
@@ -70,13 +78,14 @@ SESSION_HEADER = "X-Hermes-Session-Id"
 #: explanation of an absence the participant is about to be handed the fix for
 #: is noise — so the line is not emitted at all.
 _NO_TRACE = (
-    "harness does not expose tool calls over the wire — plant readings below "
-    "are the ground truth for what it actually did"
+    "no MLflow trace is wired up here — the tool calls below are what the "
+    "agent did, and the plant readings are the ground truth for what it "
+    "actually changed"
 )
 #: Deliberately hedged. The harness on this path is Hermes today, whose
 #: `hermes_otel` plugin does export TOOL spans, but the protocol is "any
 #: OpenAI-compatible server" and a different one may trace nothing.
-_NO_TRACE_LINK = "look for this turn's tool calls in MLflow →"
+_NO_TRACE_LINK = "open MLflow →"
 #: Shown when the turn produced no trace we can point at. It used to read
 #: "this turn's trace has not been indexed yet" and offer MLflow's front door,
 #: which said nothing useful and sent the participant to a page they then had
@@ -86,6 +95,105 @@ _NO_TRACE_LINK = "look for this turn's tool calls in MLflow →"
 _NOT_INDEXED = "no trace was collected for this turn"
 _TRACE_FOUND = ""
 _TRACE_FOUND_LINK = "see the trace →"
+
+
+#: Hermes' own SSE event name, one frame per tool call per lifecycle step.
+#: Set in `gateway/platforms/api_server.py` in the agent image; the payload is
+#: documented on `_tool_progress_events` below.
+_TOOL_PROGRESS = "hermes.tool.progress"
+
+#: The MCP servers behind this participant's gateway. Tool names arrive
+#: prefixed with the server that owns them — `telemetry_read_pump`,
+#: `control_set_pump` — which is the one piece of routing information the
+#: frame gives us for free.
+_MCP_PREFIXES = ("telemetry", "maintenance", "control")
+
+
+def _server_for(tool: str) -> str:
+    """Which server a tool name belongs to.
+
+    "local" rather than "unknown" for the rest: a tool with no MCP prefix is
+    one of Hermes' own (terminal, file, skills, web), which is a fact about
+    it and not an absence of one.
+    """
+    head = tool.split("_", 1)[0]
+    return head if head in _MCP_PREFIXES else "local"
+
+
+def _preview(tool: str, label: Any) -> str:
+    """Hermes' rendered preview, or "" when it is only the tool name again."""
+    preview = (label or "").strip() if isinstance(label, str) else ""
+    return "" if preview == tool else preview
+
+
+def _tool_progress_events(body: dict[str, Any]) -> list[dict]:
+    """One `hermes.tool.progress` frame, as this console's events.
+
+    The payload, from the agent image::
+
+        {"tool": "control_set_pump", "emoji": "…", "label": "<preview>",
+         "toolCallId": "call_abc", "status": "running"}
+
+    and later the same `toolCallId` with ``"status": "completed"`` and no
+    label. Hermes drops a completed whose start it filtered — an internal
+    tool, or one with no call id — so a completed always has a start to pair
+    with, which is what lets the front end track what is running right now
+    rather than guessing from the last name it saw.
+
+    Anything else is ignored rather than guessed at: the lifecycle has grown
+    fields twice already, and a frame this console does not understand should
+    cost nothing.
+    """
+    name = (body.get("tool") or "").strip()
+    status = (body.get("status") or "").strip()
+    if not name:
+        return []
+    call_id = str(body.get("toolCallId") or "")
+    if status == "running":
+        return [{
+            "type": "tool_call",
+            "name": name,
+            "server": _server_for(name),
+            # Empty, and not a lie: the frame carries a rendered preview, not
+            # the arguments themselves. The field stays so the front end can
+            # treat both harnesses' tool calls the same way.
+            "arguments": {},
+            #: Hermes' own one-line preview of the call — usually the
+            #: argument that matters, like the path a file tool was handed.
+            #:
+            #: Empty when it adds nothing. `build_tool_preview` picks a
+            #: primary argument by name from a table of Hermes' own tools
+            #: plus a handful of common keys; an MCP tool matches neither
+            #: (`telemetry_read_pump` takes `pump_id`), so it returns None
+            #: and the agent falls back to sending the tool name as the
+            #: label. Passing that through would render "→ telemetry_read_pump
+            #: telemetry_read_pump".
+            "preview": _preview(name, body.get("label")),
+            "callId": call_id,
+        }]
+    if status == "completed":
+        # No `ok`, no summary. The frame says the call finished, not whether
+        # it succeeded, and `tool_result` means "here is what came back" —
+        # which this is not. The front end uses it only to stop showing the
+        # tool as the one currently running.
+        return [{"type": "tool_done", "name": name, "callId": call_id}]
+    return []
+
+
+def tool_trace_available() -> bool:
+    """Can a turn on this harness produce tool lines in the trace panel?
+
+    True for both protocols now. The native one emits them directly; the
+    OpenAI one gets them from Hermes' `hermes.tool.progress` frames, which
+    `stream` translates. It used to be `PROTOCOL == "waterplant"`, and that
+    was accurate at the time — the frames were being dropped.
+
+    A claim about this console's capability, not a promise about the server:
+    a different OpenAI-compatible harness sends no such frames and a turn
+    against it will show no tool lines. Nothing here can know which it is
+    before a turn has run.
+    """
+    return PROTOCOL in ("waterplant", "openai")
 
 
 def _no_trace_event() -> dict | None:
@@ -283,8 +391,25 @@ async def relay_stream(
                 yield sse({"type": "done", "steps": 0, "rateLimitRetries": 0})
                 return
 
+            # Parsed as SSE frames, not as a stream of `data:` lines. Two
+            # kinds come down this one connection: anonymous frames carrying
+            # OpenAI chunks, and frames tagged `event: hermes.tool.progress`
+            # carrying one tool call's lifecycle. Reading only `data:` lines
+            # collapsed the distinction, so every tool frame reached the
+            # chunk parser, failed its `["choices"]` lookup and was dropped.
+            #
+            # `event_name` is cleared on the blank line that ends a frame,
+            # because that is the whole of its scope: an event name applies
+            # to the frame it appears in and to nothing after it.
+            event_name = ""
             async for line in up.aiter_lines():
                 line = line.strip()
+                if not line:
+                    event_name = ""
+                    continue
+                if line.startswith("event:"):
+                    event_name = line[6:].strip()
+                    continue
                 if not line.startswith("data:"):
                     continue
                 payload = line[5:].strip()
@@ -294,15 +419,20 @@ async def relay_stream(
                     chunk = json.loads(payload)
                 except ValueError:
                     continue
+                if event_name == _TOOL_PROGRESS:
+                    for event in _tool_progress_events(chunk):
+                        yield sse(event)
+                    continue
                 try:
                     delta = chunk["choices"][0]["delta"]
                 except (KeyError, IndexError, TypeError):
                     continue
                 if text := delta.get("content"):
                     yield sse({"type": "token", "text": text})
-                # Not expected from Hermes, which loops server-side — but a
-                # different OpenAI-compatible harness may forward them, and if
-                # one does the trace panel should light up for free.
+                # Not expected from Hermes, which reports its calls through
+                # the frames above instead — but a different
+                # OpenAI-compatible harness may forward them here, and if one
+                # does the trace panel should light up for free.
                 for call in delta.get("tool_calls") or []:
                     fn = call.get("function") or {}
                     if not fn.get("name"):
