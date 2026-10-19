@@ -64,11 +64,6 @@ MAX_HISTORY_TURNS = int(os.environ.get("AGENT_MAX_HISTORY_TURNS", "20"))
 #: matters. The store is the sandbox's state.db, so when the bridge recreates
 #: the sandbox an ongoing conversation silently starts over.
 SESSION_HEADER = "X-Hermes-Session-Id"
-#: Where this harness's spans land. `app.py` reads the same value for the header
-#: link; it is repeated here because the no-trace status line is only a dead end
-#: without somewhere to send the participant. Unset (no tracing wired) simply
-#: drops the link rather than offering a broken one.
-MLFLOW_URL = os.environ.get("MLFLOW_URL", "").strip()
 
 #: Only for a deployment with no trace lookup wired. Where the lookup *is*
 #: configured the turn ends with a link to its own trace, and opening with an
@@ -97,8 +92,12 @@ def _no_trace_event() -> dict | None:
     if traces.enabled():
         return None
     event: dict[str, Any] = {"type": "status", "message": _NO_TRACE}
-    if MLFLOW_URL:
-        event["link"] = {"href": MLFLOW_URL, "text": _NO_TRACE_LINK}
+    # The participant's own experiment list, not MLflow's front door: the
+    # status line is only a dead end without somewhere useful to send them.
+    # Unset (no tracing wired at all) drops the link rather than offering a
+    # broken one.
+    if landing := traces.landing_url():
+        event["link"] = {"href": landing, "text": _NO_TRACE_LINK}
     return event
 
 

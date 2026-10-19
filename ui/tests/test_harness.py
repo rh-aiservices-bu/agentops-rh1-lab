@@ -33,6 +33,7 @@ _ENV_KEYS = (
     "AGENT_API_KEY",
     "AGENT_MODEL",
     "MLFLOW_URL",
+    "MLFLOW_API_URL",
     "MLFLOW_EXPERIMENT",
     "MLFLOW_EXPERIMENT_ID",
     "MLFLOW_WORKSPACE",
@@ -95,7 +96,7 @@ def openai(monkeypatch):
         AGENT_PROTOCOL="openai",
         AGENT_API_KEY="server-key",
         AGENT_MODEL="hermes-agent",
-        MLFLOW_URL="https://mlflow.example/mlflow",
+        MLFLOW_URL="https://rh-ai.example/develop-train/mlflow",
     )
 
 
@@ -125,7 +126,12 @@ def openai_with_lookup(monkeypatch, tmp_path):
         AGENT_PROTOCOL="openai",
         AGENT_API_KEY="server-key",
         AGENT_MODEL="hermes-agent",
-        MLFLOW_URL="https://mlflow.example/mlflow",
+        # The browser-facing base and the API base are different hosts in
+        # production, and separating them here is what keeps the two from
+        # being conflated: every link below is built from the first, every
+        # lookup from the second.
+        MLFLOW_URL="https://rh-ai.example/develop-train/mlflow",
+        MLFLOW_API_URL="https://mlflow.example",
         MLFLOW_EXPERIMENT="user-d5h5b",
         MLFLOW_WORKSPACE="user-d5h5b-agentops",
         MLFLOW_TOKEN_FILE=str(token),
@@ -267,11 +273,41 @@ async def test_stream_translates_to_console_events(openai):
 @pytest.mark.asyncio
 async def test_no_trace_status_links_to_mlflow(openai):
     """The status line has to say where the tool calls went, not only that they
-    are absent — a participant sent to debug from a trace needs the redirect."""
+    are absent — a participant sent to debug from a trace needs the redirect.
+
+    The experiment list, not the bare base. This fixture wires no workspace,
+    which is the one case where there is nothing to scope the list to.
+    """
     async with stub(_streams) as client:
         evs = await events(openai, client)
-    assert evs[0]["link"]["href"] == "https://mlflow.example/mlflow"
+    assert evs[0]["link"]["href"] == (
+        "https://rh-ai.example/develop-train/mlflow/experiments"
+    )
     assert evs[0]["link"]["text"]
+
+
+@pytest.mark.asyncio
+async def test_no_trace_link_is_scoped_to_the_workspace(monkeypatch):
+    """With a workspace known, the fallback link opens *their* experiment list.
+
+    Without the parameter MLflow loads whichever workspace the browser session
+    last used, which for a participant is usually not theirs — so the link
+    lands them on an empty table and reads as tracing being broken.
+    """
+    mod = reload_with(
+        monkeypatch,
+        AGENT_PROTOCOL="openai",
+        AGENT_API_KEY="server-key",
+        AGENT_MODEL="hermes-agent",
+        MLFLOW_URL="https://rh-ai.example/develop-train/mlflow",
+        NAMESPACE="user-d5h5b-agentops",
+    )
+    async with stub(_streams) as client:
+        evs = await events(mod, client)
+    assert evs[0]["link"]["href"] == (
+        "https://rh-ai.example/develop-train/mlflow/experiments"
+        "?workspace=user-d5h5b-agentops"
+    )
 
 
 @pytest.mark.asyncio
@@ -291,8 +327,13 @@ async def test_turn_ends_with_a_link_to_its_own_trace(openai_with_lookup, monkey
     # that path looks right and renders an empty page. The workspace parameter
     # is required or the tab loads against whichever workspace the session
     # last used.
+    # Path-routed, because MLFLOW_URL names MLflow embedded in the RHOAI
+    # dashboard. The standalone shell on the same host wants
+    # `/#/experiments/...` instead, and a fragment never reaches the embedded
+    # app's router — which is how every one of these links came to open an
+    # empty page.
     assert statuses[0]["link"]["href"] == (
-        "https://mlflow.example/mlflow/#/experiments/2/traces"
+        "https://rh-ai.example/develop-train/mlflow/experiments/2/traces"
         "?workspace=user-d5h5b-agentops&selectedEvaluationId=tr-1"
     )
     # ... and it arrives before the turn is declared done.

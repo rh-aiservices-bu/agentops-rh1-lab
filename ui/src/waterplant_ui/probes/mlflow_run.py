@@ -42,6 +42,8 @@ from typing import Any
 
 import httpx
 
+from .. import traces
+
 log = logging.getLogger(__name__)
 
 #: Where the browser is sent. Behind the OAuth proxy, so never used for API
@@ -273,10 +275,29 @@ async def trace_url_for_session(session: str) -> str:
         trace_id = found.get(session, "")
         if not trace_id:
             return ""
-        return (
-            f"{MLFLOW_URL or MLFLOW_API_URL}/#/experiments/{experiment_id}"
-            f"/traces?workspace={NAMESPACE}&selectedEvaluationId={trace_id}"
-        )
+        return _trace_url(experiment_id, trace_id)
+
+
+def _trace_url(experiment_id: str, trace_id: str) -> str:
+    """This trace in the browser.
+
+    Delegates the *shape* to traces.trace_url, which owns it. Two hand-written
+    copies of the same f-string used to live in this file, which is how they
+    came to disagree with it: both still carried the standalone MLflow's
+    `/#/experiments/...` hash route after the console moved to MLflow embedded
+    in the RHOAI dashboard, so every eval scorecard link opened an empty page.
+
+    MLFLOW_API_URL is kept as a last resort for a deployment with no
+    browser-facing route configured. It is the in-cluster Service and no
+    participant can open it, but a wrong-looking link beats no link while
+    somebody works out why mlflowUrl is empty.
+    """
+    if MLFLOW_URL:
+        return traces.trace_url(trace_id, experiment_id)
+    return (
+        f"{MLFLOW_API_URL}/experiments/{experiment_id}"
+        f"/traces?workspace={NAMESPACE}&selectedEvaluationId={trace_id}"
+    )
 
 
 async def log_eval_sweep(
@@ -310,10 +331,7 @@ async def _write(client: httpx.AsyncClient, summary: dict[str, Any]) -> str | No
         trace_id = by_session.get(r.get("session_id") or "")
         if trace_id:
             r["trace_id"] = trace_id
-            r["traceUrl"] = (
-                f"{MLFLOW_URL or MLFLOW_API_URL}/#/experiments/{experiment_id}"
-                f"/traces?workspace={NAMESPACE}&selectedEvaluationId={trace_id}"
-            )
+            r["traceUrl"] = _trace_url(experiment_id, trace_id)
 
     now_ms = int(time.time() * 1000)
     try:
@@ -386,8 +404,15 @@ async def _write(client: httpx.AsyncClient, summary: dict[str, Any]) -> str | No
         )
         # Built from MLFLOW_URL, not MLFLOW_API_URL: this one is for a human
         # with a browser and an OpenShift session, not for this process.
+        #
+        # The Evaluation runs tab rather than the run itself. MLflow embedded
+        # in the RHOAI dashboard has no per-run route to link — the standalone
+        # shell's `#/experiments/<id>/runs/<id>` has no equivalent — so this
+        # lands on the list with the sweep's run at the top of it, which is
+        # one click away from what the old link opened and does not 404.
         base = MLFLOW_URL or MLFLOW_API_URL
-        return f"{base}/#/experiments/{experiment_id}/runs/{run_id}"
+        query = f"?workspace={NAMESPACE}" if NAMESPACE else ""
+        return f"{base}/experiments/{experiment_id}/evaluation-runs{query}"
     except (httpx.HTTPError, KeyError, ValueError) as exc:
         log.warning("mlflow eval-sweep logging failed: %s", exc)
         return None

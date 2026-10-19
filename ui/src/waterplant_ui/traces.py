@@ -43,14 +43,23 @@ from typing import Any
 
 import httpx
 
-#: What the *browser* opens: the public route, which carries a `/mlflow` path
-#: prefix.
+#: What the *browser* opens: the public route, as a base with no trailing
+#: path. The chart's default is
+#: `https://rh-ai.<domain>/develop-train/mlflow` — MLflow as embedded in the
+#: RHOAI dashboard, which is path-routed. Every link in this file is built by
+#: appending to it.
+#:
+#: The same host also serves a standalone MLflow at the bare `/mlflow`, and
+#: that one is hash-routed (`#/experiments/<id>/traces`). The two are not
+#: interchangeable: point this at the bare `/mlflow` and `trace_url` builds a
+#: path the standalone SPA has no route for. Both were confirmed serving on
+#: cluster-zwtpw.
 MLFLOW_URL = os.environ.get("MLFLOW_URL", "").rstrip("/")
 #: What *this pod* calls, when that differs from the browser-facing route.
 #:
 #: Both serve the REST API under a `/mlflow` prefix, and the two URLs carry it
-#: differently: MLFLOW_URL already ends in `/mlflow` because the route is
-#: mounted there, while the in-cluster Service
+#: differently: MLFLOW_URL already ends in `/mlflow` — whichever of the two
+#: routes it names, both end in that segment — while the in-cluster Service
 #: (`https://mlflow.redhat-ods-applications.svc.cluster.local:8443`) does not.
 #: This file used to document the opposite — "the in-cluster service serves the
 #: REST API at its root with no /mlflow prefix" — and built paths to match, so
@@ -115,8 +124,24 @@ def enabled() -> bool:
     return bool(MLFLOW_URL and WORKSPACE and (EXPERIMENT_ID or EXPERIMENT_NAME))
 
 
-def root_url() -> str:
-    return MLFLOW_URL
+def landing_url() -> str:
+    """Where to send someone who wants MLflow but not one specific trace.
+
+    The experiment *list*, scoped to this participant's workspace, rather than
+    MLFLOW_URL bare. A bare base lands on RHOAI's experiment list for whatever
+    workspace the session last used — which for a participant is usually not
+    theirs, so they see an empty table and conclude tracing is broken. One
+    query parameter is the difference between that and their own experiment
+    sitting there named after them.
+
+    Falls back to the bare base when there is no workspace to scope to, which
+    is better than a link to nowhere.
+    """
+    if not MLFLOW_URL:
+        return ""
+    if not WORKSPACE:
+        return f"{MLFLOW_URL}/experiments"
+    return f"{MLFLOW_URL}/experiments?workspace={WORKSPACE}"
 
 
 def trace_url(trace_id: str, experiment_id: str) -> str:
@@ -128,11 +153,16 @@ def trace_url(trace_id: str, experiment_id: str) -> str:
     page. The workspace parameter is required too — without it the tab loads
     against whatever workspace the session last used, which for a participant
     is usually not theirs.
+
+    Path-routed, because MLFLOW_URL names MLflow as embedded in the RHOAI
+    dashboard. This was `/#/experiments/...` when the link pointed at the
+    standalone MLflow shell on the same host; the embedded app routes on the
+    path instead, and a fragment would never reach its router.
     """
     query = f"selectedEvaluationId={trace_id}"
     if WORKSPACE:
         query = f"workspace={WORKSPACE}&{query}"
-    return f"{MLFLOW_URL}/#/experiments/{experiment_id}/traces?{query}"
+    return f"{MLFLOW_URL}/experiments/{experiment_id}/traces?{query}"
 
 
 def _client_for_mlflow() -> httpx.AsyncClient:

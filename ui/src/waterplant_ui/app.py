@@ -29,7 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import guardrails, harness
+from . import guardrails, harness, traces
 from .probes import engine as probe_engine
 from .probes import loader as probe_loader
 from .probes import events as probe_events
@@ -41,7 +41,6 @@ PLANT_API_URL = os.environ.get("PLANT_API_URL", "http://plant-api:8080")
 # Empty until the agent is deployed — the chat pane degrades to a clear
 # "not yet available" state rather than failing opaquely.
 AGENT_URL = os.environ.get("AGENT_URL", "").rstrip("/")
-MLFLOW_URL = os.environ.get("MLFLOW_URL", "")
 # The agent can legitimately take minutes: a seven-step tool chain plus backoff
 # through the shared endpoint's 429s. A 30s timeout cut off healthy requests.
 TIMEOUT_S = float(os.environ.get("HTTP_TIMEOUT_S", "300"))
@@ -164,7 +163,12 @@ async def config() -> dict[str, Any]:
     """What the front end needs to know about its environment."""
     return {
         "agentAvailable": bool(AGENT_URL),
-        "mlflowUrl": MLFLOW_URL,
+        # The footer link. A landing page, not the bare base: traces.py scopes
+        # it to this participant's workspace and points it at the experiment
+        # list, because a bare base opens whatever workspace the browser
+        # session last used and shows an empty table. Built here rather than
+        # in app.js so the whole MLflow link vocabulary stays in one module.
+        "mlflowUrl": traces.landing_url(),
         "namespace": os.environ.get("NAMESPACE", ""),
         # Which harness is behind the chat pane, and what it costs. Both are
         # reported rather than hidden: a participant told to inspect a trace or

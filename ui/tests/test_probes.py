@@ -1109,8 +1109,18 @@ async def test_the_sweep_actually_resolves_and_records_its_traces(monkeypatch):
 
     monkeypatch.setattr(mlflow_run, "MLFLOW_API_URL", "http://mlflow")
     monkeypatch.setattr(mlflow_run, "EXPERIMENT", "user-x")
-    monkeypatch.setattr(mlflow_run, "MLFLOW_URL", "https://ui/mlflow")
+    monkeypatch.setattr(
+        mlflow_run, "MLFLOW_URL", "https://rh-ai.example/develop-train/mlflow"
+    )
     monkeypatch.setattr(mlflow_run, "NAMESPACE", "user-x-agentops")
+    # Per-trace links are built by traces.trace_url, which owns the shape for
+    # the whole console — so the browser base and workspace have to be set
+    # *there* as well, not only on this module. They are the same two env
+    # vars in production; the duplication is an artefact of patching globals.
+    from waterplant_ui import traces as _tr
+
+    monkeypatch.setattr(_tr, "MLFLOW_URL", "https://rh-ai.example/develop-train/mlflow")
+    monkeypatch.setattr(_tr, "WORKSPACE", "user-x-agentops")
 
     summary = {"passed": 1, "total": 1, "results": [
         {"id": "telemetry-lookup", "title": "T", "outcome": "passed",
@@ -1119,10 +1129,19 @@ async def test_the_sweep_actually_resolves_and_records_its_traces(monkeypatch):
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     url = await mlflow_run._write(client, summary)
 
-    assert url and "run-9" in url
+    # The sweep link is the experiment's Evaluation runs tab, scoped to the
+    # workspace. Not the run itself: MLflow embedded in the RHOAI dashboard
+    # has no per-run route, so the old `#/experiments/<id>/runs/<id>` had
+    # nothing to open.
+    assert url == (
+        "https://rh-ai.example/develop-train/mlflow/experiments/7"
+        "/evaluation-runs?workspace=user-x-agentops"
+    )
     # The result carries its trace and a link the console can render...
     assert summary["results"][0]["trace_id"] == "tr-abc"
     assert "selectedEvaluationId=tr-abc" in summary["results"][0]["traceUrl"]
+    # ...path-routed, with no leftover hash from the standalone MLflow shell.
+    assert "/#/" not in summary["results"][0]["traceUrl"]
     # ...and the run is tagged with it.
     batch = [b for p_, b in posted if p_.endswith("/runs/log-batch")][0]
     assert {"key": "trace.telemetry-lookup", "value": "tr-abc"} in batch["tags"]
