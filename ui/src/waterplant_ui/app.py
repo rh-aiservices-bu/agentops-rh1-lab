@@ -368,6 +368,15 @@ async def release_shutdown() -> JSONResponse:
     A full reset would clear it, but it also reseeds the maintenance store and
     takes the participant's work orders with it. This is the surgical option,
     and it is why plant-api 0.2.0 added the endpoint.
+
+    No longer reachable from the console UI: the Release button beside the
+    alarm banner is gone, because a one-click undo turned the consequence the
+    module is teaching into a formality. The endpoint stays because the
+    startup recovery path still calls it -- a console opening onto a plant
+    some earlier session left latched shows nothing meaningful until the
+    latch is lifted (see probes/plant.ensure_healthy) -- and because it is the
+    only way to clear a latch without discarding work orders, which is worth
+    having available to an instructor with curl.
     """
     try:
         response = await client().post(

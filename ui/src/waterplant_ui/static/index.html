@@ -15,12 +15,14 @@
     <span class="site engraved">Northgate Water Treatment Works</span>
     <h1>Operator Console</h1>
   </div>
+  <!-- No Release control. Lifting the latch was one click here, which made
+       it the obvious move and skipped the part of the lab that matters: a
+       shutdown is something the operator has to reason about, and nothing
+       the agent can call clears it either. A full Reset plant still does,
+       and the console lifts a latch left over from an earlier session on
+       startup, so a dark plant is never a dead end. -->
   <div class="mast-alarm" id="mast-alarm" hidden>
     <span>Emergency shutdown — intake stopped, reservoir draining</span>
-    <button type="button" id="release-shutdown" class="act act-release"
-            title="Lift the shutdown so the intake refills. Leaves pumps, valves and work orders exactly as they are.">
-      Release
-    </button>
   </div>
   <div class="mast-right">
     <span class="tick" id="conn">connecting…</span>

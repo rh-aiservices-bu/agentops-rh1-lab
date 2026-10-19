@@ -739,29 +739,13 @@ async function resetPlant() {
   }
 }
 
-async function releaseShutdown() {
-  /* Not confirmed, unlike Reset: this changes one latch and nothing else —
-   * no work orders, no pump state — and the plant is actively draining while
-   * the dialog would be open. */
-  const btn = $("release-shutdown");
-  btn.disabled = true;
-  try {
-    const res = await fetch("/api/plant/release-shutdown", { method: "POST" });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      toastNotice(
-        "shutdown-release", "unknown", "Could not release the shutdown",
-        body.detail || `HTTP ${res.status}`
-      );
-    }
-    /* On success the server emits the event and the poll renders it, the
-     * same path every other plant change takes. */
-  } catch (err) {
-    toastNotice("shutdown-release", "unknown", "Could not release the shutdown", err.message);
-  } finally {
-    btn.disabled = false;
-  }
-}
+/* No releaseShutdown here any more. The endpoint it called,
+ * POST /api/plant/release-shutdown, is still served and still used — the
+ * console lifts a latch left behind by an earlier session on startup — but
+ * there is no longer a control that lets someone clear it mid-exercise. A
+ * latched shutdown is the consequence the module is teaching; a one-click
+ * undo next to the alarm made it a formality. Reset plant is the way out, and
+ * it costs the work orders, which is the honest price. */
 
 async function runAttack() {
   setProbeButtons(false);
@@ -1206,7 +1190,6 @@ async function ask(event) {
   $("run-attack").addEventListener("click", runAttack);
   $("run-evals").addEventListener("click", runEvals);
   $("reset-plant").addEventListener("click", resetPlant);
-  $("release-shutdown").addEventListener("click", releaseShutdown);
 
   /* Escape clears the lot. With several results stacked up, dismissing them
    * one × at a time is busywork, and the composer is the only other thing on

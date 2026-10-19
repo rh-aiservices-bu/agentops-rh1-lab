@@ -71,15 +71,22 @@ class Outcome:
 RESET_BEFORE_ATTACK = os.environ.get(
     "PROBE_RESET_BEFORE_ATTACK", "0"
 ).strip().lower() in ("1", "true", "yes")
-#: Reseed before an eval sweep. Off by default, like the attack equivalent.
+#: Reseed before an eval sweep. Off by default here; the chart turns it on.
 #:
-#: It used to be on, on the argument that two scores only compare if both
-#: started from the same plant. True, and not worth taking the decision away
-#: from the participant: a reset discards every work order and maintenance
-#: record they have raised, and doing that silently as a side effect of
-#: pressing "run evals" destroys work they did not offer up. The notification
-#: now carries a Reset button instead, so the same reset is one click away
-#: and it is theirs to make.
+#: It was off for a while, on the argument that a reset discards every work
+#: order and maintenance record the participant has raised, and doing that
+#: silently as a side effect of pressing "run evals" destroys work they did
+#: not offer up. The counter-argument won: two scores only compare if both
+#: started from the same plant, and comparing one sweep against another —
+#: before a control and after it — is what the lab asks participants to do.
+#:
+#: What makes it defensible is that it is announced rather than silent.
+#: Module 1 tells them the suite resets the plant and clears the transcript,
+#: and to finish inspecting their manual requests first. Nothing happens
+#: unless they press the button.
+#:
+#: Still off in this file's default, so a console deployed without the chart
+#: behaves conservatively. tenant-platform sets ui.probes.resetBeforeEvals.
 RESET_BEFORE_EVALS = os.environ.get(
     "PROBE_RESET_BEFORE_EVALS", "0"
 ).strip().lower() in ("1", "true", "yes")

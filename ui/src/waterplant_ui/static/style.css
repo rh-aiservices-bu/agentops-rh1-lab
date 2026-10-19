@@ -1119,12 +1119,6 @@ body.plant-shutdown .mast h1 { color: #ffd9d3; }
   body.plant-shutdown .mast { animation: none; }
 }
 
-/* Release control, inside the shutdown banner. */
+/* The shutdown banner. Text only now -- the Release control that used to
+   sit beside it is gone, along with its .act-release styling. */
 .mast-alarm { display: flex; align-items: center; gap: 12px; }
-.act-release {
-  font-size: .58rem; padding: 3px 10px;
-  color: #ffd9d3;
-  background: linear-gradient(180deg, #7a2a22 0%, #5a1d17 52%, #451410 100%);
-  border-color: rgba(255, 77, 61, .75);
-}
-.act-release:hover:not(:disabled) { filter: brightness(1.25); }
