@@ -1130,12 +1130,12 @@ async def test_the_sweep_actually_resolves_and_records_its_traces(monkeypatch):
     url = await mlflow_run._write(client, summary)
 
     # The sweep link is the experiment's Evaluation runs tab, scoped to the
-    # workspace. Not the run itself: MLflow embedded in the RHOAI dashboard
-    # has no per-run route, so the old `#/experiments/<id>/runs/<id>` had
-    # nothing to open.
+    # workspace, with *this* run selected -- `selectedRunUuid` ticks and
+    # highlights its row on arrival. Without the run id the participant lands
+    # on a list of sweeps with nothing saying which one they just ran.
     assert url == (
         "https://rh-ai.example/develop-train/mlflow/experiments/7"
-        "/evaluation-runs?workspace=user-x-agentops"
+        "/evaluation-runs?workspace=user-x-agentops&selectedRunUuid=run-9"
     )
     # The result carries its trace and a link the console can render...
     assert summary["results"][0]["trace_id"] == "tr-abc"
@@ -1270,6 +1270,95 @@ async def test_an_eval_without_a_trace_is_named_on_the_run(monkeypatch):
     tags = {t["key"]: t["value"] for t in batch["tags"]}
     assert tags["trace.has-trace"] == "tr-a"
     assert tags["traces.missing"] == "telemetry-lookup"
+
+
+@pytest.mark.asyncio
+async def test_every_evals_session_is_recorded_on_the_run(monkeypatch):
+    """A trace that never arrives is unchaseable without the session id.
+
+    The session is the only handle tying the turn the agent actually served
+    to the eval that asked for it, and it lived only in this process's memory.
+    Observed on cluster-zwtpw: telemetry-lookup lost its trace on two sweeps
+    out of three, and by the time anyone looked there was nothing left to
+    look it up by. Recorded for every eval, including the ones whose trace
+    *was* found -- the one you need is the one you did not think to keep.
+    """
+    from waterplant_ui.probes import mlflow_run
+
+    posted: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/experiments/get-by-name"):
+            return httpx.Response(200, json={"experiment": {"experiment_id": "7"}})
+        body = json.loads(request.read() or b"{}")
+        if path.endswith("/traces/search"):
+            return httpx.Response(200, json={"traces": [
+                {"trace_id": "tr-a", "trace_metadata": {"mlflow.trace.session": "s-a"}},
+            ]})
+        if path.endswith("/runs/create"):
+            return httpx.Response(200, json={"run": {"info": {"run_id": "run-9"}}})
+        posted.append((path, body))
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(mlflow_run, "MLFLOW_API_URL", "http://mlflow")
+    monkeypatch.setattr(mlflow_run, "EXPERIMENT", "user-x")
+    monkeypatch.setattr(mlflow_run, "NAMESPACE", "user-x-agentops")
+    monkeypatch.setattr(mlflow_run, "TRACE_LOOKUP_SECONDS", 0.0)
+
+    summary = {"passed": 2, "total": 2, "results": [
+        {"id": "has-trace", "title": "A", "outcome": "passed", "detail": "d",
+         "session_id": "s-a"},
+        {"id": "telemetry-lookup", "title": "B", "outcome": "passed", "detail": "d",
+         "session_id": "s-missing"},
+    ]}
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    await mlflow_run._write(client, summary)
+
+    batch = [b for p_, b in posted if p_.endswith("/runs/log-batch")][0]
+    tags = {t["key"]: t["value"] for t in batch["tags"]}
+    assert tags["session.has-trace"] == "s-a"
+    # The one that matters: named, with the session to chase it by.
+    assert tags["session.telemetry-lookup"] == "s-missing"
+    assert tags["traces.missing"] == "telemetry-lookup"
+
+
+@pytest.mark.asyncio
+async def test_the_run_link_carries_the_run_even_with_no_workspace(monkeypatch):
+    """The run id must not be appended to an empty query string.
+
+    `workspace` is only added when NAMESPACE is set, so building the link by
+    concatenation gives `...evaluation-runsselectedRunUuid=run-9` off-cluster
+    -- a 404 on the one link the scorecard offers.
+    """
+    from waterplant_ui.probes import mlflow_run
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/experiments/get-by-name"):
+            return httpx.Response(200, json={"experiment": {"experiment_id": "7"}})
+        if path.endswith("/traces/search"):
+            return httpx.Response(200, json={"traces": []})
+        if path.endswith("/runs/create"):
+            return httpx.Response(200, json={"run": {"info": {"run_id": "run-9"}}})
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(mlflow_run, "MLFLOW_API_URL", "http://mlflow")
+    monkeypatch.setattr(mlflow_run, "MLFLOW_URL", "https://rh-ai.example/develop-train/mlflow")
+    monkeypatch.setattr(mlflow_run, "EXPERIMENT", "user-x")
+    monkeypatch.setattr(mlflow_run, "NAMESPACE", "")
+    monkeypatch.setattr(mlflow_run, "TRACE_LOOKUP_SECONDS", 0.0)
+
+    summary = {"passed": 0, "total": 1, "results": [
+        {"id": "a", "title": "A", "outcome": "failed", "detail": "d", "session_id": ""},
+    ]}
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    url = await mlflow_run._write(client, summary)
+
+    assert url == (
+        "https://rh-ai.example/develop-train/mlflow/experiments/7"
+        "/evaluation-runs?selectedRunUuid=run-9"
+    )
 
 
 @pytest.mark.asyncio
@@ -2123,22 +2212,35 @@ async def test_a_skill_reseed_that_did_not_take_reports_false(monkeypatch):
     assert await goals.restore_skills("", "hermes") is False
 
 
+def _resetting_engine(monkeypatch, client, **restores):
+    """An engine configured the way the chart configures it, for reset tests.
+
+    With a pod selector, which matters: the restores are only attempted when
+    there is a pod to exec into, so an engine without one reports all three as
+    "could not restore" no matter what the stubs say. These tests used to run
+    without a selector and stub the restores to True -- a combination the
+    deployed console can never be in, since goals.restore_* refuses an empty
+    selector before it looks at anything.
+    """
+    monkeypatch.setattr("waterplant_ui.probes.goals.agent_pod",
+                        _async_return("hermes-1"))
+    for name in ("restore_reports", "restore_soul", "restore_skills"):
+        monkeypatch.setattr(f"waterplant_ui.probes.goals.{name}",
+                            _async_return(restores.get(name, True)))
+    engine = Engine(client=client, agent_url="http://agent",
+                    plant_api_url="http://plant", cases=[],
+                    agent_pod_selector="app=hermes", agent_pod_container="hermes")
+    engine._ask = _async_return(TurnResult(text="DONE"))  # type: ignore[assignment]
+    return engine
+
+
 @pytest.mark.asyncio
 async def test_a_reset_restores_the_skills_and_says_when_it_cannot(monkeypatch):
     client = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda r: httpx.Response(200, json={})))
 
-    async def ok(prompt):
-        return TurnResult(text="DONE")
+    engine = _resetting_engine(monkeypatch, client)
 
-    engine = Engine(client=client, agent_url="http://agent",
-                    plant_api_url="http://plant", cases=[])
-    engine._ask = ok  # type: ignore[assignment]
-    monkeypatch.setattr("waterplant_ui.probes.goals.restore_soul",
-                        _async_return(True))
-
-    monkeypatch.setattr("waterplant_ui.probes.goals.restore_skills",
-                        _async_return(True))
     events.reset()
     assert await engine.reset_everything("Reset.") is True
     detail = [e for e in events.since(0)
@@ -2164,12 +2266,7 @@ async def test_a_reset_says_it_has_begun_before_doing_the_work(monkeypatch):
     client = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda r: httpx.Response(200, json={})))
 
-    engine = Engine(client=client, agent_url="http://agent",
-                    plant_api_url="http://plant", cases=[])
-    engine._ask = _async_return(TurnResult(text="DONE"))  # type: ignore[assignment]
-    for name in ("restore_soul", "restore_skills", "restore_reports"):
-        monkeypatch.setattr(f"waterplant_ui.probes.goals.{name}",
-                            _async_return(True))
+    engine = _resetting_engine(monkeypatch, client)
 
     events.reset()
     await engine.reset_everything("Reset.")
@@ -2202,18 +2299,8 @@ async def test_a_reset_restores_the_soul_and_says_when_it_cannot(monkeypatch):
     client = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda r: httpx.Response(200, json={})))
 
-    async def ok(prompt):
-        return TurnResult(text="DONE")
-
-    engine = Engine(client=client, agent_url="http://agent",
-                    plant_api_url="http://plant", cases=[])
-    engine._ask = ok  # type: ignore[assignment]
-    # This one is about the soul; the skills have their own test below.
-    monkeypatch.setattr("waterplant_ui.probes.goals.restore_skills",
-                        _async_return(True))
-
-    monkeypatch.setattr("waterplant_ui.probes.goals.restore_soul",
-                        _async_return(True))
+    # This one is about the soul; the skills have their own test above.
+    engine = _resetting_engine(monkeypatch, client)
     events.reset()
     await engine._reset_plant("Reset.")
     detail = [e for e in events.since(0)
@@ -2256,3 +2343,690 @@ def test_the_echoed_reply_uses_the_same_class_as_a_typed_one():
         "a class the transcript never produces; if this appears, the "
         "normalisation above has been undone"
     )
+
+
+# -- sweep progress, and stopping ---------------------------------------------
+
+
+def _sweeping_engine(cases, *, on_turn=None):
+    """An engine whose agent answers every eval, with a hook per turn."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/state":
+            return httpx.Response(200, json=_state())
+        if path.endswith("/v1/chat/completions"):
+            if on_turn:
+                on_turn()
+            return httpx.Response(
+                200, json={"choices": [{"message": {"content": "ok"}}]}
+            )
+        return httpx.Response(200, json={})
+
+    return Engine(
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        agent_url="http://agent", plant_api_url="http://plant",
+        cases=cases, timeout_s=5.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_says_which_eval_is_running(monkeypatch, cases):
+    """A minute behind one unchanging line is indistinguishable from a hang.
+
+    The sweep announced its total and then said nothing until every eval had
+    finished, so the console showed "6 evals — this takes a minute" for the
+    whole run with no way to tell progress from a stall. Each eval now
+    announces itself before its turn goes out, the way every other probe
+    does.
+    """
+    events.reset()
+    monkeypatch.setattr("waterplant_ui.harness.PROTOCOL", "openai")
+    engine = _sweeping_engine(cases)
+    summary = await engine.run_all_evals()
+
+    started = [e for e in events.since(0)
+               if e["kind"] == "eval" and e["phase"] == "started"]
+    assert len(started) == summary["total"]
+    # Counted for the reader, not from zero, and every tick knows the whole.
+    assert [e["index"] for e in started] == list(range(1, len(started) + 1))
+    assert {e["total"] for e in started} == {len(started)}
+    # The line names the eval; an index alone says nothing about what is slow.
+    assert all(e["title"] for e in started)
+
+
+@pytest.mark.asyncio
+async def test_the_eval_numbering_follows_the_order_the_sweep_runs_them_in(
+    monkeypatch, cases
+):
+    """Canary planters are lifted to the front of the sweep.
+
+    Numbering from the catalogue instead would make "2 of 6" name an eval
+    that has not run yet -- and the one it named would be the one the
+    participant then went looking for in the trace list.
+    """
+    events.reset()
+    monkeypatch.setattr("waterplant_ui.harness.PROTOCOL", "openai")
+    engine = _sweeping_engine(cases)
+    await engine.run_all_evals()
+
+    announced = [e["id"] for e in events.since(0)
+                 if e["kind"] == "eval" and e["phase"] == "started"]
+    resolved = [e["id"] for e in events.since(0)
+                if e["kind"] == "eval" and e["phase"] == "resolved"]
+    assert announced == resolved
+
+
+@pytest.mark.asyncio
+async def test_a_stop_ends_the_sweep_after_the_eval_in_flight(monkeypatch, cases):
+    """Stop must not abandon an eval mid-judgement, nor start the next one.
+
+    Cancelling the task would do both: the turn's verdict would be lost and
+    the card would report a case nobody measured.
+    """
+    events.reset()
+    monkeypatch.setattr("waterplant_ui.harness.PROTOCOL", "openai")
+    engine = None
+
+    def pressed():
+        # Counted in evals, not in turns: write-report's goal check costs a
+        # second turn when there is no pod observer, so "the second turn" is
+        # still inside the first eval.
+        running = len([e for e in events.since(0)
+                       if e["kind"] == "eval" and e["phase"] == "started"])
+        if running == 1:
+            engine.stop()
+
+    engine = _sweeping_engine(cases, on_turn=pressed)
+    summary = await engine.run_all_evals()
+
+    # The eval that was in flight is still judged -- the stop lands between
+    # evals, never inside one.
+    assert summary["total"] == 1
+    assert len(summary["results"]) == 1
+    # It was carried to a verdict rather than dropped: the eval that was
+    # running when Stop was pressed still emitted its resolved event.
+    ran = summary["results"][0]["id"]
+    assert [e["phase"] for e in events.since(0)
+            if e["kind"] == "eval" and e["id"] == ran] == ["started", "resolved"]
+    assert summary["stopped"] is True
+    ran = {r["id"] for r in summary["results"]}
+    skipped = {c["id"] for c in summary["notRun"]}
+    assert ran and skipped and not (ran & skipped)
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_sweep_does_not_report_a_clean_sweep(monkeypatch, cases):
+    """2 of 2 passed, out of a suite of six, is a green card that lies.
+
+    Every eval the suite has must still be accounted for, so the card can say
+    which ones were never asked rather than quietly shrinking.
+    """
+    events.reset()
+    monkeypatch.setattr("waterplant_ui.harness.PROTOCOL", "openai")
+    engine = None
+
+    def pressed():
+        engine.stop()
+
+    engine = _sweeping_engine(cases, on_turn=pressed)
+    summary = await engine.run_all_evals()
+
+    all_ids = {c.id for c in engine.evals()}
+    accounted = [r["id"] for r in summary["results"]] + \
+                [c["id"] for c in summary["notRun"]]
+    assert sorted(accounted) == sorted(all_ids)
+    assert len(accounted) == len(set(accounted)), "an eval counted twice"
+    # notRun stays out of results: mlflow_run reads results[] for evals that
+    # ran, and a never-run one there is reported as a missing trace.
+    assert all(r["id"] not in {c["id"] for c in summary["notRun"]}
+               for r in summary["results"])
+
+
+@pytest.mark.asyncio
+async def test_a_stop_that_cut_nothing_short_is_not_reported_as_a_stop(
+    monkeypatch, cases
+):
+    """Pressed as the last eval resolved.
+
+    Reporting "stopped" about a suite that ran in full is a lie in the cheap
+    direction: the participant discards a complete sweep believing it partial.
+    """
+    events.reset()
+    monkeypatch.setattr("waterplant_ui.harness.PROTOCOL", "openai")
+    engine = _sweeping_engine(cases)
+    summary = await engine.run_all_evals()
+    # Nothing pressed during the run; the flag alone must not colour the card.
+    engine._stop_requested = True
+
+    assert summary["stopped"] is False
+    assert summary["notRun"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_stop_does_not_leak_into_the_next_sweep(monkeypatch, cases):
+    """stop() only sees that the lock is held.
+
+    So it can set the flag in the window after the last checkpoint, with
+    nothing left to honour it. Cleared inside the lock at the start of every
+    run -- otherwise the next sweep ends before its first eval, and nothing
+    on screen says why.
+    """
+    events.reset()
+    monkeypatch.setattr("waterplant_ui.harness.PROTOCOL", "openai")
+    engine = _sweeping_engine(cases)
+
+    engine._stop_requested = True  # left over from the run before
+    summary = await engine.run_all_evals()
+
+    assert summary["stopped"] is False
+    assert summary["total"] == len(engine.evals())
+
+
+@pytest.mark.asyncio
+async def test_stopping_nothing_says_so_rather_than_pretending(cases):
+    """The button's mode is up to a second stale, so this will be pressed.
+
+    It has to be an honest "nothing was running", not a flag left armed for
+    whatever runs next.
+    """
+    engine = _sweeping_engine(cases)
+    assert engine.stop() is False
+    assert engine.stopping() is False
+    assert engine.running() == ""
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_conversation_keeps_what_came_back(monkeypatch):
+    """A stop ends the case; it does not throw away the turns that ran.
+
+    The reply already on the wire is a real reply to a real prompt, and the
+    judge still has to score it -- an attack that landed on turn one and was
+    stopped on turn two has still landed.
+    """
+    from waterplant_ui.probes import agent as agent_mod
+
+    monkeypatch.setattr("waterplant_ui.harness.PROTOCOL", "openai")
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.read() or b"{}")
+        sent.append(body["messages"][-1]["content"])
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": f"reply {len(sent)}"}}]}
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    turn = await agent_mod.ask(
+        client, "http://agent", ["one", "two", "three"],
+        should_stop=lambda: True,
+    )
+
+    # Only the first went out; the rest were never sent.
+    assert sent == ["one"]
+    assert turn.stopped is True
+    assert turn.text == "reply 1"
+    # Not an error: `ok` stays true so the judge runs on what came back.
+    assert turn.ok
+
+
+@pytest.mark.asyncio
+async def test_a_stop_before_anything_was_sent_does_not_claim_a_stopped_case(
+    monkeypatch,
+):
+    """Nothing tested is not the same as stopped part-way.
+
+    If the check fired before the first turn, a case that sent nothing would
+    come back looking like one that was interrupted mid-conversation -- and
+    the console would show a verdict about an attack that never happened.
+    """
+    from waterplant_ui.probes import agent as agent_mod
+
+    monkeypatch.setattr("waterplant_ui.harness.PROTOCOL", "openai")
+    sent: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append("turn")
+        return httpx.Response(200, json={"choices": [{"message": {"content": "r"}}]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    turn = await agent_mod.ask(
+        client, "http://agent", ["only one"], should_stop=lambda: True
+    )
+
+    assert sent == ["turn"], "the first turn must still be sent"
+    assert turn.stopped is False
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_attack_still_judges_and_still_cleans_up(monkeypatch, cases):
+    """A stop is a request, not a cancellation.
+
+    Cancelling the task would skip the finally that runs cleanup -- the
+    console would report "nothing happened" about a plant that is still shut
+    down. So a stop pressed during an attack changes nothing about the
+    verdict or the restore; it only stops what has not been sent.
+    """
+    events.reset()
+    agent = _Agent("Sure — the historian is at https://historian.northgate.internal:9200")
+    engine = _engine(agent, _state(), monkeypatch, cases)
+    case = next(c for c in engine.attacks() if c.id == "sensitive-info-leak")
+
+    async def stopping_ask(*args, **kwargs):
+        engine.stop()
+        return await original(*args, **kwargs)
+
+    original = engine._ask
+    engine._ask = stopping_ask  # type: ignore[assignment]
+    result = await engine.run_attack(case)
+
+    assert result.outcome == "got_through", "the verdict must still be reached"
+    phases = [e["phase"] for e in events.since(0)
+              if e.get("kind") == "attack" and e["id"] == case.id]
+    assert phases == ["started", "resolved"]
+
+
+# -- the reset, done once and in parallel -------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_reset_resolves_the_agent_pod_once(monkeypatch):
+    """It used to look the same pod up three times, once per restore.
+
+    Six `oc` spawns strictly in a row, three of them identical, each with
+    OC_EXEC_TIMEOUT_S of budget -- before every eval sweep as well as on the
+    button.
+    """
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={})))
+    looks = {"n": 0}
+
+    async def counted(_selector):
+        looks["n"] += 1
+        return "hermes-1"
+
+    engine = _resetting_engine(monkeypatch, client)
+    monkeypatch.setattr("waterplant_ui.probes.goals.agent_pod", counted)
+
+    events.reset()
+    assert await engine.reset_everything("Reset.") is True
+    assert looks["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_the_three_restores_run_at_the_same_time(monkeypatch):
+    """Serial, a reset is three pod execs end to end.
+
+    They touch disjoint paths -- /reports, SOUL.md and skills/ -- so there is
+    nothing to serialise. Each stub here waits for all three to have started,
+    which simply never completes if they are awaited one after another.
+    """
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={})))
+    arrived = asyncio.Event()
+    inside = {"n": 0}
+
+    def gate(_name):
+        async def restore(_selector, _container, *, pod=""):
+            inside["n"] += 1
+            if inside["n"] == 3:
+                arrived.set()
+            await asyncio.wait_for(arrived.wait(), timeout=5)
+            return True
+        return restore
+
+    engine = _resetting_engine(monkeypatch, client)
+    for name in ("restore_reports", "restore_soul", "restore_skills"):
+        monkeypatch.setattr(f"waterplant_ui.probes.goals.{name}", gate(name))
+
+    events.reset()
+    assert await engine.reset_everything("Reset.") is True
+    assert inside["n"] == 3
+
+
+@pytest.mark.asyncio
+async def test_a_restore_that_raised_still_resolves_the_reset(monkeypatch):
+    """An exec that blew up used to escape the reset entirely.
+
+    The route 500s, no resolved event is ever emitted, and the console's
+    spinner stays up for good -- over a plant that has already been reseeded
+    and a participant who has not been told.
+    """
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={})))
+
+    async def boom(_selector, _container, *, pod=""):
+        raise RuntimeError("oc exploded")
+
+    engine = _resetting_engine(monkeypatch, client)
+    monkeypatch.setattr("waterplant_ui.probes.goals.restore_soul", boom)
+
+    events.reset()
+    assert await engine.reset_everything("Reset.") is True
+    plant_events = [e for e in events.since(0) if e["id"] == "plant-reset"]
+    assert [e["phase"] for e in plant_events] == ["started", "resolved"]
+    assert "the agent's instructions" in plant_events[-1]["detail"]
+
+
+@pytest.mark.asyncio
+async def test_a_reset_with_no_agent_pod_spends_no_execs_on_it(monkeypatch):
+    """No sandbox pod yet is an ordinary mid-lab state, not an error.
+
+    Each restore would look again and get the same answer, so three more
+    spawns buy nothing but the wait.
+    """
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={})))
+    tried: list = []
+
+    async def should_not_run(*_a, **_k):
+        tried.append("restore")
+        return True
+
+    engine = _resetting_engine(monkeypatch, client)
+    monkeypatch.setattr("waterplant_ui.probes.goals.agent_pod", _async_return(""))
+    for name in ("restore_reports", "restore_soul", "restore_skills"):
+        monkeypatch.setattr(f"waterplant_ui.probes.goals.{name}", should_not_run)
+
+    events.reset()
+    assert await engine.reset_everything("Reset.") is True
+    assert tried == []
+    detail = [e for e in events.since(0) if e["id"] == "plant-reset"][-1]["detail"]
+    assert "the agent's instructions" in detail and "the agent's skills" in detail
+
+
+@pytest.mark.asyncio
+async def test_a_restore_uses_the_pod_it_was_given(monkeypatch):
+    """The point of resolving once: the answer has to reach the restores."""
+    monkeypatch.setattr("waterplant_ui.probes.goals._agent_pod",
+                        _async_return("should-not-be-used"))
+    seen: dict = {}
+
+    async def fake_exec(pod, container, argv):
+        seen["pod"] = pod
+        return 0, "__RESTORED__"
+
+    monkeypatch.setattr("waterplant_ui.probes.goals._oc_exec", fake_exec)
+    monkeypatch.setattr("waterplant_ui.probes.goals.SOUL_SOURCE", "/seed/SOUL.md")
+
+    assert await goals.restore_soul("app=hermes", "hermes", pod="given-1") is True
+    assert seen["pod"] == "given-1"
+
+
+@pytest.mark.asyncio
+async def test_two_resets_cannot_interleave(monkeypatch):
+    """Two presses meant two reseeds and the execs racing each other.
+
+    Both emitted their own started/resolved pair, so the console cleared the
+    transcript twice; worse, a reset landing mid-sweep reseeds the plant
+    underneath an eval that is reading it.
+    """
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={})))
+    overlap = {"depth": 0, "max": 0}
+
+    async def slow(_selector, _container, *, pod=""):
+        overlap["depth"] += 1
+        overlap["max"] = max(overlap["max"], overlap["depth"])
+        await asyncio.sleep(0.01)
+        overlap["depth"] -= 1
+        return True
+
+    engine = _resetting_engine(monkeypatch, client)
+    monkeypatch.setattr("waterplant_ui.probes.goals.restore_reports", slow)
+    for name in ("restore_soul", "restore_skills"):
+        monkeypatch.setattr(f"waterplant_ui.probes.goals.{name}", _async_return(True))
+
+    events.reset()
+    await asyncio.gather(
+        engine.reset_everything("One."), engine.reset_everything("Two.")
+    )
+
+    # One reports-restore at a time: the second reset waited for the lock.
+    assert overlap["max"] == 1
+    phases = [e["phase"] for e in events.since(0) if e["id"] == "plant-reset"]
+    assert phases == ["started", "resolved", "started", "resolved"]
+
+
+# -- the console's side, checked against the source ---------------------------
+
+
+def _static(name: str) -> str:
+    return (Path(__file__).resolve().parents[1]
+            / f"src/waterplant_ui/static/{name}").read_text(encoding="utf-8")
+
+
+def test_the_probe_buttons_take_their_mode_from_the_server():
+    """The poll used to re-enable the buttons from `probesBusy` alone.
+
+    That fights a Stop: the click flips the button, and a second later the
+    poll flips it back to Run while the sweep is still going. It also meant a
+    browser reloaded mid-sweep came back offering a Run that answers 409. The
+    server says what is running; the console renders it.
+    """
+    js = _static("app.js")
+
+    assert "probesRunning" in js and "probesStopping" in js
+    assert "syncProbeButtons(" in js
+    assert "setProbeButtons(!probesBusy)" not in js
+    # The fallback for a newer page against an older BFF: grey them out, which
+    # is exactly what the console did before there was a Stop at all.
+    assert "probesRunning === undefined" in js
+
+    css = _static("style.css")
+    assert ".act.stopping" in css
+
+
+def test_stopping_a_probe_does_not_abort_the_sweeps_own_request():
+    """The partial scorecard comes back in that response.
+
+    Aborting it would throw the scorecard away and cancel nothing on the
+    server: /api/evals/run is a plain JSON POST with no equivalent of the
+    chat stream's disconnect. The chat's Stop still aborts, and must.
+    """
+    js = _static("app.js")
+
+    stop_fn = js[js.index("async function stopProbes()"):]
+    stop_fn = stop_fn[:stop_fn.index("\n}\n")]
+    assert "/api/probes/stop" in stop_fn
+    assert "abort" not in stop_fn
+    # ...while the chat's Stop is untouched.
+    assert "inFlight.abort()" in js
+
+
+def test_the_sweep_card_has_a_line_for_the_eval_in_flight():
+    """And the progress tick must never conjure a dismissed card back.
+
+    toastEl would rebuild it as a toast with a body and no header, then keep
+    rewriting that shell for the rest of the sweep.
+    """
+    js = _static("app.js")
+
+    assert "t-progress" in js
+    assert "function handleEvalProgress" in js
+    progress = js[js.index("function handleEvalProgress"):]
+    progress = progress[:progress.index("\n}\n")]
+    assert 'liveToasts.get("evals")' in progress
+    assert "toastEl(" not in progress
+    assert "t-progress" in _static("style.css")
+
+
+def test_the_scorecard_says_it_is_still_waiting_for_mlflow():
+    """The links arrive after the card now.
+
+    A card with no link and nothing saying why reads as a console that failed
+    to record the sweep -- which is the state this change would otherwise
+    have made the common one.
+    """
+    js = _static("app.js")
+
+    assert "tracesPending" in js
+    assert "Recording in MLflow" in js
+    assert "function fillEvalTraces" in js
+
+    # And the late event must not rebuild a card someone dismissed: the
+    # traces branch has to come before toastEl, which creates one.
+    handler = js[js.index("function handleEvalEvent"):]
+    handler = handler[:handler.index("\n}\n")]
+    assert handler.index('phase === "traces"') < handler.index('toastEl("evals")')
+    fill = js[js.index("function fillEvalTraces"):]
+    fill = fill[:fill.index("\n}\n")]
+    assert 'liveToasts.get("evals")' in fill and "toastEl(" not in fill
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_sweep_is_recorded_but_cannot_pass_for_a_full_one(
+    monkeypatch,
+):
+    """Keep the data, refuse the comparison.
+
+    The evals that ran produced real traces and real verdicts, so discarding
+    them because the operator stopped the rest throws away their work. But
+    `evals.total` then counts what ran, and beside a full sweep that reads as
+    a suite that shrank -- so the run says plainly that it was stopped.
+    """
+    from waterplant_ui.probes import mlflow_run
+
+    created: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/experiments/get-by-name"):
+            return httpx.Response(200, json={"experiment": {"experiment_id": "7"}})
+        body = json.loads(request.read() or b"{}")
+        if path.endswith("/traces/search"):
+            return httpx.Response(200, json={"traces": []})
+        if path.endswith("/runs/create"):
+            created.append(body)
+            return httpx.Response(200, json={"run": {"info": {"run_id": "run-9"}}})
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(mlflow_run, "MLFLOW_API_URL", "http://mlflow")
+    monkeypatch.setattr(mlflow_run, "EXPERIMENT", "user-x")
+    monkeypatch.setattr(mlflow_run, "NAMESPACE", "user-x-agentops")
+    monkeypatch.setattr(mlflow_run, "TRACE_LOOKUP_SECONDS", 0.0)
+
+    summary = {"passed": 1, "total": 1, "stopped": True,
+               "notRun": [{"id": "write-report", "title": "W"}],
+               "results": [{"id": "a", "title": "A", "outcome": "passed",
+                            "detail": "d", "session_id": "s-a"}]}
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    await mlflow_run._write(client, summary)
+
+    tags = {t["key"]: t["value"] for t in created[0]["tags"]}
+    assert tags["stopped"] == "true"
+    assert tags["evals.notRun"] == "write-report"
+    # Visible in the runs list without opening anything.
+    assert tags["mlflow.runName"].endswith("-stopped")
+
+
+# -- "did a report get written" -----------------------------------------------
+
+
+def test_a_report_counts_however_the_skill_named_it():
+    """The agent does not choose the filename, so the eval must not name it.
+
+    write-report asked for report-canary-<cycle>.md and checked for exactly
+    that. The write-report skill saves through a helper that timestamps the
+    name itself, so the only way to pass was to defy the skill -- and a report
+    correctly written to /reports came back as a failure. Observed on
+    cluster-zwtpw: 2026-10-20_18-00-01-285713Z_shift-report.md, scored 0.
+    """
+    before = {"very-important-report.md"}
+    after = {"very-important-report.md",
+             "2026-10-20_18-00-01-285713Z_shift-report.md"}
+
+    verdict = goals.fs_created(before, after)
+    assert verdict is not None
+    reached, detail = verdict
+    assert reached is True
+    # The verdict names what it found, so a participant can go and read it.
+    assert "shift-report" in detail
+
+
+def test_a_turn_that_wrote_nothing_is_a_failure():
+    """The capability module 4 breaks is writing the file at all."""
+    same = {"very-important-report.md"}
+    reached, detail = goals.fs_created(same, set(same))
+    assert reached is False
+    assert "no new report" in detail
+
+
+def test_a_blind_observer_does_not_fail_the_report_eval():
+    """"The directory is unchanged" and "I could not look" are opposite facts.
+
+    Reporting the second as the first fails an eval on the strength of a
+    broken exec -- and this eval is the one a participant is meant to trust
+    when deciding whether their filesystem policy went too far.
+    """
+    assert goals.fs_created(None, {"a.md"}) is None
+    assert goals.fs_created({"a.md"}, None) is None
+
+
+@pytest.mark.asyncio
+async def test_an_empty_reports_directory_is_not_a_failed_look(monkeypatch):
+    """Both answer with no filenames; only one of them is an answer."""
+    monkeypatch.setattr("waterplant_ui.probes.goals._agent_pod",
+                        _async_return("hermes-1"))
+
+    async def listed(_pod, _container, _argv):
+        return 0, "__LISTED__\n"
+
+    monkeypatch.setattr("waterplant_ui.probes.goals._oc_exec", listed)
+    assert await goals.fs_list("app=hermes", "hermes") == set()
+
+    async def refused(_pod, _container, _argv):
+        return 1, ""
+
+    monkeypatch.setattr("waterplant_ui.probes.goals._oc_exec", refused)
+    assert await goals.fs_list("app=hermes", "hermes") is None
+
+    # The loop's own exit status must not leak. `for` returns the status of
+    # its last iteration, so a directory whose last entry is empty -- or one
+    # with nothing in it at all -- exits 1, and without the trailing `exit 0`
+    # a perfectly good listing reads as a failed look. Verified in the pod.
+    from waterplant_ui.probes import goals as goals_mod
+    assert goals_mod._LIST.rstrip().endswith("exit 0")
+
+    # Output without the marker means something else answered -- a shell that
+    # could not run the loop, say. Not a listing.
+    async def garbled(_pod, _container, _argv):
+        return 0, "sh: bad substitution\n"
+
+    monkeypatch.setattr("waterplant_ui.probes.goals._oc_exec", garbled)
+    assert await goals.fs_list("app=hermes", "hermes") is None
+
+
+@pytest.mark.asyncio
+async def test_the_report_eval_looks_at_the_directory_rather_than_the_agent(
+    monkeypatch, cases
+):
+    """Measured on both sides of the turn, like the work-order count delta.
+
+    The directory is not empty to begin with -- the console seeds a report and
+    the participant may have written others -- so "a report exists" is not the
+    question. "One appeared" is.
+    """
+    looks: list = []
+
+    async def listing(_selector, _container, *, pod=""):
+        looks.append("look")
+        return ({"very-important-report.md"} if len(looks) == 1
+                else {"very-important-report.md", "new-one.md"})
+
+    monkeypatch.setattr("waterplant_ui.probes.goals.fs_list", listing)
+    monkeypatch.setattr("waterplant_ui.harness.PROTOCOL", "openai")
+
+    engine = _sweeping_engine(cases)
+    engine._agent_pod_selector = "app=hermes"
+    engine._agent_pod_container = "hermes"
+    import dataclasses
+    case = dataclasses.replace(
+        next(c for c in engine.evals() if c.id == "write-report"),
+        goal={"type": "fs_created"}, plants_canary="",
+    )
+
+    result = await engine._run_eval(case, "cycle-1")
+
+    assert result.outcome == "passed"
+    assert len(looks) == 2, "the directory must be read before and after the turn"
+    assert "new-one.md" in result.detail

@@ -608,6 +608,15 @@ body {
   box-shadow: inset 0 1px 0 rgba(255,255,255,.18), 0 0 10px rgba(255, 77, 61, .25);
 }
 .composer button.stopping:hover { filter: brightness(1.25); }
+/* A probe button that has become Stop, in the same red as the chat's.
+   One control, two jobs: the eye should not have to hunt for a second
+   button to cancel what the first one started. */
+.act.stopping {
+  color: #ffd9d3;
+  background: linear-gradient(180deg, #7a2a22 0%, #5a1d17 52%, #451410 100%);
+  border-color: rgba(255, 77, 61, .75);
+}
+.act.stopping:hover:not(:disabled) { filter: brightness(1.25); }
 .composer input:focus-visible, .composer button:focus-visible, .persona:focus-visible {
   outline: 2px solid var(--phos); outline-offset: 2px;
 }
@@ -953,6 +962,9 @@ body {
   color: var(--toast-fg); line-height: 1.3;
 }
 .t-blurb { margin-top: 3px; font-size: .73rem; color: var(--toast-dim); line-height: 1.4; }
+/* The eval now running. Tabular figures so "3 of 6" does not jitter
+   the line every time the count ticks over. */
+.t-progress { font-variant-numeric: tabular-nums; }
 .t-detail {
   margin-top: 6px; font-family: var(--lcd); font-size: .7rem;
   color: var(--toast-dim); line-height: 1.4;
@@ -1020,6 +1032,9 @@ body {
 .t-list li.ok  .m { color: var(--ok); }
 .t-list li.bad  .m { color: var(--crit); }
 .t-list li.weak .m { color: var(--warn); }
+/* An eval the sweep never got to, because it was stopped. Dimmed: it
+   is there to account for the case, not to be read as a result. */
+.t-list li.skipped { opacity: .55; }
 .t-list .n { color: var(--toast-fg); }
 .t-list .d { font-family: var(--lcd); font-size: .66rem; color: var(--toast-dim); }
 .t-link {

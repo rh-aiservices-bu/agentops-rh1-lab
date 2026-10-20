@@ -1090,6 +1090,11 @@ def test_the_reset_button_runs_the_engines_full_reset(monkeypatch):
     called: dict = {}
 
     class StubEngine:
+        # The route gates on busy() now: a reset landing mid-sweep reseeds the
+        # plant underneath an eval that is reading it.
+        def busy(self):
+            return False
+
         async def reset_everything(self, why):
             called["why"] = why
             return True
@@ -1108,6 +1113,9 @@ def test_a_refused_reset_is_not_reported_as_one(monkeypatch):
     from waterplant_ui import app as _app
 
     class RefusingEngine:
+        def busy(self):
+            return False
+
         async def reset_everything(self, why):
             return False
 
@@ -1116,3 +1124,219 @@ def test_a_refused_reset_is_not_reported_as_one(monkeypatch):
 
     assert res.status_code == 502
     assert res.json()["error"] == "reset_failed"
+
+
+# -- stopping a probe ---------------------------------------------------------
+
+
+def test_the_stop_route_reaches_the_engine_while_a_sweep_is_open(monkeypatch):
+    """It has to be a route, not an abort.
+
+    The sweep's own POST is still open when the button is pressed, and
+    /api/evals/run is plain JSON: aborting that fetch cancels nothing on this
+    side and throws away the partial scorecard it is about to return.
+    """
+    from fastapi.testclient import TestClient
+
+    from waterplant_ui import app as _app
+
+    asked: dict = {}
+
+    class StubEngine:
+        def busy(self):
+            return True
+
+        def running(self):
+            return "evals"
+
+        def stopping(self):
+            return False
+
+        def stop(self):
+            asked["stopped"] = True
+            return True
+
+    monkeypatch.setattr(_app, "_engine", StubEngine())
+    res = TestClient(_app.app).post("/api/probes/stop")
+
+    assert res.status_code == 200
+    assert res.json() == {"stopping": True, "what": "evals"}
+    assert asked.get("stopped")
+
+
+def test_stopping_when_nothing_runs_is_not_an_error(monkeypatch):
+    """The button's mode comes from a 1 Hz poll, so it is up to a second old.
+
+    Pressing Stop just as a sweep finishes is ordinary. An error there would
+    put a red toast over a scorecard that is perfectly fine.
+    """
+    from fastapi.testclient import TestClient
+
+    from waterplant_ui import app as _app
+
+    class IdleEngine:
+        def busy(self):
+            return False
+
+        def running(self):
+            return ""
+
+        def stopping(self):
+            return False
+
+        def stop(self):
+            return False
+
+    monkeypatch.setattr(_app, "_engine", IdleEngine())
+    res = TestClient(_app.app).post("/api/probes/stop")
+
+    assert res.status_code == 200
+    assert res.json()["stopping"] is False
+
+
+def test_the_reset_button_refuses_while_a_probe_is_running(monkeypatch):
+    """A reset landing mid-sweep reseeds the plant underneath an eval.
+
+    The eval then fails for a reason that has nothing to do with the
+    participant's policy -- which is what the sweep's lock exists to prevent,
+    and this route was the one way round it.
+    """
+    from fastapi.testclient import TestClient
+
+    from waterplant_ui import app as _app
+
+    reset = {"ran": False}
+
+    class BusyEngine:
+        def busy(self):
+            return True
+
+        async def reset_everything(self, why):
+            reset["ran"] = True
+            return True
+
+    monkeypatch.setattr(_app, "_engine", BusyEngine())
+    res = TestClient(_app.app).post("/api/plant/reset")
+
+    assert res.status_code == 409
+    assert res.json()["error"] == "busy"
+    assert not reset["ran"], "the reset ran anyway"
+
+
+def test_the_state_route_says_which_probe_is_running(monkeypatch):
+    """"busy" cannot tell the console which button should read Stop.
+
+    And a browser reloaded mid-sweep would come back showing Run, press it,
+    and get a 409 for its trouble.
+    """
+    from fastapi.testclient import TestClient
+
+    from waterplant_ui import app as _app
+
+    class RunningEngine:
+        def busy(self):
+            return True
+
+        def running(self):
+            return "evals"
+
+        def stopping(self):
+            return True
+
+    monkeypatch.setattr(_app, "_engine", RunningEngine())
+
+    async def fake_gather(*_paths):
+        return [{}, {"checks": []}]
+
+    monkeypatch.setattr(_app, "_gather", fake_gather)
+    body = TestClient(_app.app).get("/api/state?eventsSince=0").json()
+
+    assert body["probesRunning"] == "evals"
+    assert body["probesStopping"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_deferred_mlflow_write_always_answers_the_scorecard(monkeypatch):
+    """The card says "Recording in MLflow…" until this event arrives.
+
+    So the event has to arrive on every path, including the ones that fail.
+    Silence here leaves the participant looking at a card that never finishes
+    -- worse than the wait that moving this off the request removed.
+    """
+    from waterplant_ui import app as _app
+    from waterplant_ui.probes import events as probe_events
+
+    async def explode(*_a, **_k):
+        raise RuntimeError("mlflow fell over")
+
+    monkeypatch.setattr(_app.mlflow_run, "log_eval_sweep", explode)
+    probe_events.reset()
+
+    await _app._record_sweep({
+        "results": [{"id": "telemetry-lookup", "outcome": "passed"}],
+    })
+
+    traces = [e for e in probe_events.since(0) if e.get("phase") == "traces"]
+    assert len(traces) == 1, "the card was never told the write had finished"
+    assert traces[0]["mlflowRunUrl"] is None
+    # And it still names the eval whose trace never turned up.
+    assert traces[0]["tracesMissing"] == ["telemetry-lookup"]
+
+
+def test_the_sweep_returns_its_scorecard_before_mlflow_is_written(monkeypatch):
+    """The MLflow write waits for the sweep's traces to be exported.
+
+    That wait only ends early when every one of them arrives, so a sweep with
+    one trace that never comes held the response for the full lookup budget
+    with the scorecard already computed -- the participant watching a spinner
+    over a result the server had in its hand.
+    """
+    import asyncio
+
+    from fastapi.testclient import TestClient
+
+    from waterplant_ui import app as _app
+    from waterplant_ui.probes import events as probe_events
+
+    class StubEngine:
+        def busy(self):
+            return False
+
+        async def run_all_evals(self):
+            return {"kind": "evals", "phase": "resolved", "id": "eval-sweep",
+                    "title": "Evaluation suite", "passed": 1, "total": 1,
+                    "inconclusive": 0, "stopped": False, "notRun": [],
+                    "results": [{"id": "a", "title": "A", "outcome": "passed",
+                                 "detail": "d", "session_id": "s-a"}]}
+
+    waited = asyncio.Event()
+
+    async def slow_write(_client, summary):
+        await waited.wait()
+        summary["results"][0]["traceUrl"] = "https://mlflow.example/t/1"
+        summary["results"][0]["trace_id"] = "tr-1"
+        return "https://mlflow.example/run"
+
+    monkeypatch.setattr(_app, "_engine", StubEngine())
+    monkeypatch.setattr(_app.mlflow_run, "log_eval_sweep", slow_write)
+    probe_events.reset()
+
+    with TestClient(_app.app) as tc:
+        body = tc.post("/api/evals/run").json()
+
+        # Back with the scorecard while the write is still blocked.
+        assert body["passed"] == 1
+        assert body["tracesPending"] is True
+        assert "mlflowRunUrl" not in body
+        assert not [e for e in probe_events.since(0) if e.get("phase") == "traces"]
+
+        waited.set()
+        for _ in range(100):
+            traces = [e for e in probe_events.since(0) if e.get("phase") == "traces"]
+            if traces:
+                break
+            tc.get("/healthz")  # let the loop run
+
+    assert traces, "the links never arrived"
+    assert traces[0]["mlflowRunUrl"] == "https://mlflow.example/run"
+    assert traces[0]["results"][0]["traceUrl"] == "https://mlflow.example/t/1"

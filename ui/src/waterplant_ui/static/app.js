@@ -322,11 +322,17 @@ function renderChecks(safety) {
  * next one asks from the same cursor again. */
 let eventCursor = -1;
 
+/* Which probe button is a Stop right now: "evals", "attack", "reset",
+ * "other" or "". Set from the poll, so the server is the authority and a
+ * reload mid-sweep comes back correct. */
+let probeMode = "";
+
 async function poll() {
   try {
     const res = await fetch(`/api/state?eventsSince=${eventCursor}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const { plant, safety, events, eventCursor: cursor, probesBusy } = await res.json();
+    const { plant, safety, events, eventCursor: cursor, probesBusy,
+            probesRunning, probesStopping } = await res.json();
 
     /* An emergency shutdown stops the intake controller, so the reservoir
      * drains from here on. It is the one plant state that gets worse the
@@ -343,7 +349,16 @@ async function poll() {
 
     if (typeof cursor === "number") eventCursor = cursor;
     (events || []).forEach(handleProbeEvent);
-    setProbeButtons(!probesBusy);
+    /* The server owns which button reads Stop. It has to: this poll used to
+     * re-enable from probesBusy alone, which would undo a Stop state a second
+     * after the click, and a browser reloaded mid-sweep would come back
+     * offering a Run that answers 409. `probesRunning` undefined is an older
+     * BFF behind a newer page — fall back to greying out, which is what the
+     * console did before there was a Stop at all. */
+    syncProbeButtons(
+      probesRunning === undefined ? (probesBusy ? "other" : "") : probesRunning,
+      !!probesStopping,
+    );
 
     /* Nothing to say while the plant is answering. This used to read
      * "live · tick 3927", which counted simulator ticks — a number with no
@@ -580,7 +595,13 @@ function handleProbeEvent(ev) {
     );
   }
   if (ev.kind === "evals") return handleEvalEvent(ev);
-  if (ev.kind === "eval") return; // per-eval detail lands in the sweep card
+  if (ev.kind === "eval") {
+    /* Which one is running, written into the sweep card. The verdicts are
+     * still dropped: they arrive again as rows of the scorecard, and a toast
+     * per eval would bury the scorecard under six of them. */
+    if (ev.phase === "started") handleEvalProgress(ev);
+    return;
+  }
   if (ev.kind !== "attack") return;
 
   const el = toastEl(`attack:${ev.id}`);
@@ -656,6 +677,11 @@ function handleProbeEvent(ev) {
 }
 
 function handleEvalEvent(ev) {
+  /* Before toastEl, which would *create* the card: the trace links arrive
+   * after the scorecard, and someone who dismissed it in between would get
+   * it back as an empty shell with nothing in it to patch. */
+  if (ev.phase === "traces") return fillEvalTraces(ev);
+
   const el = toastEl("evals");
   const body = toastBody(el);
 
@@ -664,11 +690,13 @@ function handleEvalEvent(ev) {
     body.innerHTML = `
       <div class="t-hd"><span class="t-mark spin">◴</span>
         <span class="t-kind">Running evaluations</span></div>
-      <div class="t-blurb">${esc(ev.total)} evals against the agent — this takes a minute.</div>`;
+      <div class="t-blurb t-progress">${esc(ev.total)} evals against the agent — starting…</div>`;
     return;
   }
 
-  const all = ev.passed === ev.total && ev.total > 0;
+  /* A sweep stopped half-way is not a clean sweep, however well the evals
+   * that did run scored. */
+  const all = ev.passed === ev.total && ev.total > 0 && !ev.stopped;
   const rows = (ev.results || [])
     .map((r) => {
       const o = OUTCOME[r.outcome] || OUTCOME.inconclusive;
@@ -686,25 +714,149 @@ function handleEvalEvent(ev) {
     })
     .join("");
 
+  /* Every eval the suite has is accounted for, including the ones the stop
+   * meant were never asked. A card that simply lists fewer rows reads as a
+   * suite that is smaller than it is. */
+  const skipped = (ev.notRun || [])
+    .map(
+      (r) => `<li class="skipped"><span class="m">–</span>
+        <span class="n">${esc(r.title)}</span>
+        <span class="d">not run — stopped</span></li>`
+    )
+    .join("");
+
   el.className = `toast wide ${all ? "ok" : "bad"}`;
   body.innerHTML = `
     <div class="t-hd"><span class="t-mark">${all ? "✓" : "✗"}</span>
-      <span class="t-kind">Evaluation suite</span></div>
+      <span class="t-kind">Evaluation suite${ev.stopped ? " — stopped" : ""}</span></div>
     <div class="t-score">${ev.passed} <span class="of">/ ${ev.total}</span>
       <span class="w">evals passed</span></div>
     ${ev.inconclusive ? `<div class="t-detail">${ev.inconclusive} could not be judged — not counted as failures.</div>` : ""}
-    <ul class="t-list">${rows}</ul>
-    ${
-      ev.mlflowRunUrl
-        ? `<a class="t-link" href="${esc(ev.mlflowRunUrl)}" target="_blank" rel="noopener">Open the MLflow run →</a>`
-        : `<div class="t-detail">No MLflow run recorded — tracking is not configured here.</div>`
-    }`;
+    <ul class="t-list">${rows}${skipped}</ul>
+    <div class="t-mlflow">${evalRunLink(ev)}</div>`;
 }
 
+/* The run link, or what is standing in for it. Three states, and the middle
+ * one is the reason this is a function: while the write is still running the
+ * card has to say so, because a card that silently has no link looks like a
+ * console that failed to record the sweep. */
+function evalRunLink(ev) {
+  if (ev.mlflowRunUrl) {
+    return `<a class="t-link" href="${esc(ev.mlflowRunUrl)}" target="_blank" rel="noopener">Open the MLflow run →</a>`;
+  }
+  if (ev.tracesPending) {
+    return `<span class="t-detail">Recording in MLflow…</span>`;
+  }
+  return `<div class="t-detail">No MLflow run recorded — tracking is not configured here.</div>`;
+}
+
+/* Trace links and the run link, once MLflow has them. */
+function fillEvalTraces(ev) {
+  const el = liveToasts.get("evals");
+  if (!el || !el.isConnected) return;
+  const body = toastBody(el);
+
+  const link = body.querySelector(".t-mlflow");
+  if (link) link.innerHTML = evalRunLink({ ...ev, tracesPending: false });
+
+  /* Rows are in the order the server sent them, which is the order the sweep
+   * ran, so index matches. Only the rows that gained a trace are touched —
+   * the rest already say "no trace", which stays true. */
+  const rows = body.querySelectorAll(".t-list li:not(.skipped)");
+  (ev.results || []).forEach((r, i) => {
+    if (!r.traceUrl || !rows[i]) return;
+    const slot = rows[i].querySelector(".t-trace");
+    if (!slot) return;
+    const a = document.createElement("a");
+    a.className = "t-trace";
+    a.href = r.traceUrl;
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.textContent = "trace →";
+    slot.replaceWith(a);
+  });
+}
+
+/* The eval now running, in the sweep card's own line.
+ *
+ * liveToasts.get rather than toastEl: a progress tick must never conjure a
+ * card. Someone who dismissed the sweep card would get it back as a toast
+ * with a body and no header, rewritten by every tick for the rest of the
+ * minute. */
+function handleEvalProgress(ev) {
+  const el = liveToasts.get("evals");
+  if (!el || !el.isConnected) return;
+  const slot = toastBody(el).querySelector(".t-progress");
+  if (!slot) return;
+  /* textContent: the title comes from a YAML definition a lab author edits. */
+  slot.textContent = ev.total
+    ? `${ev.index} of ${ev.total} · ${ev.title}`
+    : ev.title;
+}
+
+const PROBE_BUTTONS = ["run-attack", "run-evals", "reset-plant", "attack-choice"];
+
 function setProbeButtons(enabled) {
-  for (const id of ["run-attack", "run-evals", "reset-plant", "attack-choice"]) {
+  for (const id of PROBE_BUTTONS) {
     const b = $(id);
     if (b) b.disabled = !enabled;
+  }
+}
+
+/* Run becomes Stop while that probe is running, the way Send becomes Stop
+ * while the agent has the floor.
+ *
+ * The labels are stashed on first use rather than hard-coded back: the
+ * catalogue rewrites them at boot ("6 of 7 attacks armed…"), and restoring a
+ * literal would throw that away. */
+const STOP_LABEL = { "run-evals": "Stop evals", "run-attack": "Stop attack" };
+const STOPS_WHAT = { "run-evals": "evals", "run-attack": "attack" };
+const STOP_HINT =
+  "Stop after the step now running. Whatever has finished is still scored, " +
+  "and a turn already sent to the agent is not taken back.";
+
+function syncProbeButtons(running, stopping) {
+  probeMode = running || "";
+  for (const id of PROBE_BUTTONS) {
+    const b = $(id);
+    if (!b) continue;
+    const lbl = b.querySelector(".lbl");
+    if (lbl && b.dataset.lbl === undefined) b.dataset.lbl = lbl.textContent;
+    if (b.dataset.hint === undefined) b.dataset.hint = b.title;
+
+    const isStop = !!running && STOPS_WHAT[id] === running;
+    /* Disabled while something else runs, and while a stop we already asked
+     * for is on its way — pressing it twice does nothing useful. */
+    b.disabled = (!!running && !isStop) || (isStop && stopping);
+    if (!lbl) continue;
+    lbl.textContent = isStop
+      ? stopping
+        ? "Stopping…"
+        : STOP_LABEL[id]
+      : b.dataset.lbl;
+    b.classList.toggle("stopping", isStop);
+    b.title = isStop ? STOP_HINT : b.dataset.hint;
+  }
+}
+
+/* Ask the server to stop. The in-flight /api/evals/run fetch is deliberately
+ * NOT aborted: the partial scorecard comes back in that response, and
+ * aborting it would cancel nothing on the server anyway — a plain JSON POST
+ * has no equivalent of the chat stream's disconnect. This is the one place
+ * the probe Stop and the chat Stop differ. */
+async function stopProbes() {
+  const was = probeMode;
+  syncProbeButtons(was, true);
+  try {
+    const res = await fetch("/api/probes/stop", { method: "POST" });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
+    /* Already finished between the poll and the click. An ordinary outcome,
+     * not an error: the button's mode is up to a second old. */
+    if (body.stopping === false) syncProbeButtons("", false);
+  } catch (err) {
+    toastNotice("probe-error", "unknown", "Could not stop", err.message);
+    syncProbeButtons(was, false);
   }
 }
 
@@ -730,7 +882,9 @@ async function resetPlant() {
   );
   if (!ok) return;
 
-  setProbeButtons(false);
+  /* Reset has no Stop — it is short now, and stopping half a restore would
+   * leave the agent with some of its files back and some not. */
+  syncProbeButtons("reset", false);
   try {
     const res = await fetch("/api/plant/reset", { method: "POST" });
     const body = await res.json().catch(() => ({}));
@@ -742,7 +896,7 @@ async function resetPlant() {
   } catch (err) {
     toastNotice("plant-reset", "unknown", "Reset failed", err.message);
   } finally {
-    setProbeButtons(true);
+    syncProbeButtons("", false);
   }
 }
 
@@ -755,7 +909,8 @@ async function resetPlant() {
  * it costs the work orders, which is the honest price. */
 
 async function runAttack() {
-  setProbeButtons(false);
+  if (probeMode === "attack") return stopProbes();
+  syncProbeButtons("attack", false);
   try {
     const res = await fetch("/api/attacks/run", {
       method: "POST",
@@ -765,7 +920,7 @@ async function runAttack() {
     const body = await res.json().catch(() => ({}));
     if (!res.ok) {
       toastNotice("probe-error", "unknown", "Attack not started", body.detail || `HTTP ${res.status}`);
-      setProbeButtons(true);
+      syncProbeButtons("", false);
     }
     /* On success we say nothing here. The `started` event is already on its
      * way through the 1 Hz poll and will raise the real toast — announcing it
@@ -773,12 +928,13 @@ async function runAttack() {
      * scheduler drift apart. */
   } catch (err) {
     toastNotice("probe-error", "unknown", "Attack not started", err.message);
-    setProbeButtons(true);
+    syncProbeButtons("", false);
   }
 }
 
 async function runEvals() {
-  setProbeButtons(false);
+  if (probeMode === "evals") return stopProbes();
+  syncProbeButtons("evals", false);
   try {
     const res = await fetch("/api/evals/run", { method: "POST" });
     const body = await res.json().catch(() => ({}));
@@ -793,7 +949,10 @@ async function runEvals() {
   } catch (err) {
     toastNotice("probe-error", "unknown", "Evals failed", err.message);
   } finally {
-    setProbeButtons(true);
+    /* Not left to the poll: a button still reading "Stop evals" after the
+     * fetch threw is the one state nothing else would clear. The next poll
+     * corrects this within a second if the sweep is somehow still running. */
+    syncProbeButtons("", false);
   }
 }
 

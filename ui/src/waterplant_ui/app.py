@@ -96,6 +96,11 @@ STATIC = Path(__file__).parent / "static"
 _client: httpx.AsyncClient | None = None
 _engine: probe_engine.Engine | None = None
 _scheduler: scheduler.Scheduler | None = None
+#: The MLflow write for the last sweep, which runs after the scorecard has
+#: already gone to the browser. Held only so an overlap is visible in the log
+#: rather than silent; two sweeps write two different runs, so the earlier one
+#: is never cancelled.
+_mlflow_task: asyncio.Task[None] | None = None
 
 
 @asynccontextmanager
@@ -226,6 +231,12 @@ async def state(events_since: int = Query(-1, alias="eventsSince")) -> JSONRespo
             "events": new_events,
             "eventCursor": cursor,
             "probesBusy": _engine.busy() if _engine else False,
+            # Which probe is running, and whether a stop is already on its
+            # way. The console's buttons are a function of these: "busy"
+            # alone cannot say which button should read Stop, and a browser
+            # reloaded mid-sweep would come back offering a Run that 409s.
+            "probesRunning": _engine.running() if _engine else "",
+            "probesStopping": _engine.stopping() if _engine else False,
         }
     )
 
@@ -315,6 +326,28 @@ async def run_attack(req: AttackRequest) -> JSONResponse:
     return JSONResponse({"started": True, "id": case.id, "title": case.title})
 
 
+@app.post("/api/probes/stop")
+async def stop_probes() -> JSONResponse:
+    """Ask the running probe to stop at its next checkpoint.
+
+    Its own route because the sweep's POST is still open when the button is
+    pressed: /api/evals/run is a plain JSON response, so aborting that fetch
+    cancels nothing on this side. The chat's Stop works by aborting, but only
+    because that one is a stream and Hermes interrupts the agent when its SSE
+    client goes away; there is no such mechanism here.
+
+    200 either way. `stopping: false` means there was nothing to stop, which
+    is an ordinary answer rather than an error: the console's button mode
+    comes from a 1 Hz poll, so pressing Stop just as a sweep finishes is a
+    thing that will happen.
+    """
+    if _engine is None:
+        return _probes_unavailable()
+    if not _engine.stop():
+        return JSONResponse({"stopping": False, "detail": "Nothing is running."})
+    return JSONResponse({"stopping": True, "what": _engine.running()})
+
+
 @app.post("/api/plant/reset")
 async def reset_plant() -> JSONResponse:
     """Restore the seeded plant, on the operator's explicit say-so.
@@ -334,6 +367,17 @@ async def reset_plant() -> JSONResponse:
     same plant-reset event this did, naming anything it could not restore.
     """
     if _engine is not None:
+        # The same gate the other two buttons have. A reset landing mid-sweep
+        # reseeds the plant underneath an eval that is reading it, and the
+        # eval then fails for a reason that has nothing to do with the
+        # participant's policy — which is what the sweep's lock exists to
+        # prevent. 409 rather than queueing: a button that hangs for the
+        # minutes a sweep takes is the thing 409 is for.
+        if _engine.busy():
+            return JSONResponse(
+                {"error": "busy", "detail": "A probe is already running."},
+                status_code=409,
+            )
         if not await _engine.reset_everything(
             "the plant is back at its seeded starting state."
         ):
@@ -430,11 +474,56 @@ async def run_evals() -> JSONResponse:
         )
 
     summary = await _engine.run_all_evals()
-    # Best-effort: a sweep that ran is a sweep that counts, whether or not
-    # MLflow was reachable to record it.
-    summary["mlflowRunUrl"] = await mlflow_run.log_eval_sweep(client(), summary)
+    # The scorecard goes out now; MLflow is recorded after it.
+    #
+    # Recording means waiting for the sweep's traces to be exported, and that
+    # wait only ends early when *every* one of them arrives — so a sweep with
+    # one trace that never comes burned the full lookup budget with the
+    # scorecard already computed and the participant watching a spinner. The
+    # links arrive in their own event a moment later, exactly as an attack's
+    # trace link already does.
+    summary["tracesPending"] = True
     probe_events.emit(**summary)
+    _record_sweep_later(summary)
     return JSONResponse(summary)
+
+
+def _record_sweep_later(summary: dict[str, Any]) -> None:
+    global _mlflow_task
+    if _mlflow_task is not None and not _mlflow_task.done():
+        # Two sweeps cannot overlap (the engine's lock), so this means the
+        # previous sweep's traces are still being waited for. Harmless — it
+        # writes its own run — but worth seeing in the log.
+        log.info("mlflow: the previous sweep's write is still running")
+    _mlflow_task = asyncio.create_task(_record_sweep(summary))
+
+
+async def _record_sweep(summary: dict[str, Any]) -> None:
+    """Write the sweep to MLflow and tell the console where it landed.
+
+    Emits its event on every path, including the failures. A card left saying
+    "recording in MLflow…" for ever is worse than the wait this replaced, so
+    "MLflow is not configured" and "MLflow raised" both have to arrive as an
+    answer rather than as silence.
+    """
+    url: str | None = None
+    try:
+        url = await mlflow_run.log_eval_sweep(client(), summary)
+    except Exception as exc:  # noqa: BLE001 - a sweep that ran still counts
+        log.warning("mlflow eval-sweep write failed: %s", exc)
+    finally:
+        probe_events.emit(
+            kind="evals", phase="traces", id="eval-sweep",
+            mlflowRunUrl=url,
+            results=[
+                {"id": r["id"], "traceUrl": r.get("traceUrl", "")}
+                for r in summary.get("results", [])
+            ],
+            tracesMissing=[
+                r["id"] for r in summary.get("results", [])
+                if not r.get("trace_id")
+            ],
+        )
 
 
 async def _gather(*paths: str) -> list[Any]:

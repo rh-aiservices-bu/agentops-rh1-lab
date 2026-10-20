@@ -408,6 +408,14 @@ async def _write(client: httpx.AsyncClient, summary: dict[str, Any]) -> str | No
             r["traceUrl"] = _trace_url(experiment_id, trace_id)
 
     now_ms = int(time.time() * 1000)
+    # A stopped sweep is still recorded -- the evals that ran produced real
+    # traces and real verdicts, and discarding them because the operator
+    # stopped the rest throws away their data. But it is named and tagged so
+    # it can never be read as a sweep of the whole suite: `evals.total` below
+    # counts what ran, which beside a full run would otherwise look like a
+    # suite that shrank.
+    stopped = bool(summary.get("stopped"))
+    not_run = ",".join(c["id"] for c in summary.get("notRun", []))
     try:
         created = await client.post(
             _api("/runs/create"),
@@ -415,9 +423,14 @@ async def _write(client: httpx.AsyncClient, summary: dict[str, Any]) -> str | No
                 "experiment_id": experiment_id,
                 "start_time": now_ms,
                 "tags": [
-                    {"key": "mlflow.runName", "value": f"evals-{now_ms}"},
+                    {"key": "mlflow.runName",
+                     "value": f"evals-{now_ms}-stopped" if stopped
+                              else f"evals-{now_ms}"},
                     {"key": "kind", "value": "eval-sweep"},
                     {"key": "namespace", "value": NAMESPACE},
+                    *([{"key": "stopped", "value": "true"},
+                       {"key": "evals.notRun", "value": not_run[:400]}]
+                      if stopped else []),
                 ],
             },
             headers=_headers(),
@@ -471,6 +484,17 @@ async def _write(client: httpx.AsyncClient, summary: dict[str, Any]) -> str | No
         missing = [r["id"] for r in summary["results"] if not r.get("trace_id")]
         if missing:
             tags.append({"key": "traces.missing", "value": ",".join(missing)[:400]})
+        # The conversation each eval ran under, kept whether or not a trace was
+        # found for it. Without this a missing trace is unchaseable: the
+        # session id is the only handle that ties the turn the agent actually
+        # served to the eval that asked for it, and it lived only in memory
+        # until now. Observed on cluster-zwtpw, telemetry-lookup losing its
+        # trace on two sweeps out of three with nothing left to look it up by.
+        tags += [
+            {"key": f"session.{r['id']}", "value": r["session_id"]}
+            for r in summary["results"]
+            if r.get("session_id")
+        ]
 
         await client.post(
             _api("/runs/log-batch"),
@@ -489,13 +513,19 @@ async def _write(client: httpx.AsyncClient, summary: dict[str, Any]) -> str | No
         # Built from MLFLOW_URL, not MLFLOW_API_URL: this one is for a human
         # with a browser and an OpenShift session, not for this process.
         #
-        # The Evaluation runs tab rather than the run itself. MLflow embedded
-        # in the RHOAI dashboard has no per-run route to link — the standalone
-        # shell's `#/experiments/<id>/runs/<id>` has no equivalent — so this
-        # lands on the list with the sweep's run at the top of it, which is
-        # one click away from what the old link opened and does not 404.
+        # The Evaluation runs list with *this* run selected, which is what
+        # `selectedRunUuid` does: the row is ticked and highlighted on arrival.
+        # The list rather than the run's own page — `/runs/<id>/evaluations`
+        # does exist, contrary to what this comment used to claim — because
+        # the lab's question is "how does this sweep compare with the last
+        # one", and the list is where that comparison is. The run's own rows
+        # are one click from here.
         base = MLFLOW_URL or MLFLOW_API_URL
-        query = f"?workspace={NAMESPACE}" if NAMESPACE else ""
+        params = []
+        if NAMESPACE:
+            params.append(f"workspace={NAMESPACE}")
+        params.append(f"selectedRunUuid={run_id}")
+        query = "?" + "&".join(params)
         return f"{base}/experiments/{experiment_id}/evaluation-runs{query}"
     except (httpx.HTTPError, KeyError, ValueError) as exc:
         log.warning("mlflow eval-sweep logging failed: %s", exc)

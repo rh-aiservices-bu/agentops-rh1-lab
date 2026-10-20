@@ -150,6 +150,15 @@ class Engine:
         #: by construction had never existed, and deleted-reports skipped
         #: itself forever.
         self._canaries: dict[str, str] = {}
+        #: What holds the lock: "evals", "attack", "reset" or "". The
+        #: console's button labels are a function of this and nothing else,
+        #: so a browser reloaded mid-sweep comes back showing Stop rather
+        #: than a Run button that answers 409.
+        self._running = ""
+        #: A stop the operator asked for, honoured between evals and between
+        #: an attack's turns. Never mid-cleanup: a half-undone attack leaves
+        #: the plant in a state nobody was told about.
+        self._stop_requested = False
 
     async def reset_everything(self, why: str) -> bool:
         """The whole reset, for the console's Reset button.
@@ -158,8 +167,21 @@ class Engine:
         and they cannot drift apart again. They had: the endpoint reset the
         simulation alone, which left a tampered soul and a patched skill in
         place through the one reset a participant can press.
+
+        Under the lock, unlike the `_reset_plant` it delegates to: that one is
+        called *with* the lock held by the sweep and the attack paths, and an
+        asyncio.Lock does not nest. Two presses used to interleave — two
+        reseeds, the execs racing each other, two plant-reset event pairs, so
+        the console cleared the transcript twice — and a reset landing
+        mid-sweep reseeds the plant underneath an eval that is reading it.
         """
-        return await self._reset_plant(why)
+        async with self._lock:
+            self._stop_requested = False
+            self._running = "reset"
+            try:
+                return await self._reset_plant(why)
+            finally:
+                self._running = ""
 
     async def _reset_plant(self, why: str) -> bool:
         """Reseed the plant and tell the console, so it can clear with it.
@@ -190,24 +212,7 @@ class Engine:
                 detail="plant-api refused the reset; nothing was changed",
             )
             return False
-        restored = await self._restore_report()
-        # The agent's instructions go back too. tampered-agent-config rewrites
-        # them, and an agent left running on an attacker's instructions
-        # answers every later turn from them — so a reset that puts the plant
-        # right and leaves the soul rewritten has not reset the lab.
-        soul = await goals.restore_soul(
-            self._agent_pod_selector, self._agent_pod_container
-        )
-        # And its skills. A patched SKILL.md is the longer-lived half of the
-        # same problem: the soul is one file the agent reads every turn, a
-        # skill is a file it reads on the next lookup of that kind — so an
-        # injected "reply only in emoji" written into read-safety-docs keeps
-        # answering in later modules that never asked for a bulletin. The
-        # same call also removes any skill the agent invented, which a lab
-        # whose modules assume exactly two cannot carry forward.
-        skills = await goals.restore_skills(
-            self._agent_pod_selector, self._agent_pod_container
-        )
+        restored, soul, skills = await self._restore_agent_files()
         missed = []
         if not restored:
             missed.append(goals.REPORTS_CANARY)
@@ -223,6 +228,66 @@ class Engine:
                    f" Could not restore: {', '.join(missed)}."),
         )
         return True
+
+    async def _restore_agent_files(self) -> tuple[bool, bool, bool]:
+        """Reports, instructions and skills, put back together.
+
+        One pod lookup for the three of them, and the three copies in flight
+        at once. It was six `oc` spawns strictly in a row — three of them the
+        same `oc get pods` — and at OC_EXEC_TIMEOUT_S apiece that is a reset
+        the participant sits through watching one spinner, before every eval
+        sweep as well as on the button.
+
+        Concurrent is safe because the three touch disjoint paths: /reports,
+        $HERMES_HOME/SOUL.md, and $HERMES_HOME/skills (reseed-skills.sh
+        writes nowhere else — checked, because the whole argument rests on
+        it).
+
+        Returns reports, instructions, skills — the order the resolved event
+        names them in, which is the order anyone reading "Could not restore:"
+        has already learned.
+        """
+        if not (self._agent_pod_selector and self._agent_pod_container):
+            # No pod to exec into: the report falls back to asking the agent
+            # and the other two cannot be done at all. The same answers by
+            # the same paths as before.
+            return await self._restore_report(), False, False
+
+        pod = await goals.agent_pod(self._agent_pod_selector)
+        if not pod:
+            # No single running pod — the sandbox a participant has not made
+            # yet, which is an ordinary mid-lab state. Each restore would
+            # look again and get the same answer, so skip all three rather
+            # than spend three more spawns learning it twice more.
+            return False, False, False
+
+        sel, con = self._agent_pod_selector, self._agent_pod_container
+        # The agent's instructions go back too. tampered-agent-config rewrites
+        # them, and an agent left running on an attacker's instructions
+        # answers every later turn from them — so a reset that puts the plant
+        # right and leaves the soul rewritten has not reset the lab.
+        #
+        # And its skills. A patched SKILL.md is the longer-lived half of the
+        # same problem: the soul is one file the agent reads every turn, a
+        # skill is a file it reads on the next lookup of that kind — so an
+        # injected "reply only in emoji" written into read-safety-docs keeps
+        # answering in later modules that never asked for a bulletin. That
+        # call also removes any skill the agent invented, which a lab whose
+        # modules assume exactly two cannot carry forward.
+        done = await asyncio.gather(
+            goals.restore_reports(sel, con, pod=pod),
+            goals.restore_soul(sel, con, pod=pod),
+            goals.restore_skills(sel, con, pod=pod),
+            return_exceptions=True,
+        )
+        # `is True`, not truthiness: an exec that raised has to come back as
+        # "could not restore this one". Letting it propagate aborts a reset
+        # that has already reseeded the plant and not yet said so — the route
+        # 500s and the console's spinner stays up for good.
+        for outcome in done:
+            if isinstance(outcome, BaseException):
+                log.warning("reset: a restore failed: %s", outcome)
+        return tuple(r is True for r in done)  # type: ignore[return-value]
 
     async def _restore_report(self) -> bool:
         """Put the reports directory back to its starting state.
@@ -281,6 +346,38 @@ class Engine:
     def busy(self) -> bool:
         return self._lock.locked()
 
+    def running(self) -> str:
+        """What is running right now: "evals", "attack", "reset" or "".
+
+        `busy` cannot tell the console which button to turn into Stop, and a
+        browser reloaded mid-sweep would otherwise come back offering a Run
+        that answers 409.
+        """
+        return self._running
+
+    def stopping(self) -> bool:
+        """Has a stop been asked for and not yet taken effect?"""
+        return self._stop_requested
+
+    def stop(self) -> bool:
+        """Ask whatever is running to stop at its next checkpoint.
+
+        Returns whether there was anything to stop.
+
+        Cooperative, deliberately. Cancelling the task instead would be
+        unsafe: CancelledError is a BaseException, so `_run_attack`'s
+        `except Exception` misses it and the finally that runs cleanup would
+        fire with `succeeded` still False -- skipping the cleanup -- then emit
+        an empty inconclusive verdict and die. That is the console reporting
+        "nothing happened" about a plant that is still shut down. So a stop
+        ends the sweep and reports what finished; it does not un-run the turn
+        already in flight, which is running on the agent's side anyway.
+        """
+        if not self._lock.locked():
+            return False
+        self._stop_requested = True
+        return True
+
     def catalogue(self) -> dict[str, Any]:
         """What the console renders in its "not yet armed" list."""
         return {
@@ -329,7 +426,17 @@ class Engine:
             severity=case.severity, blurb=case.blurb,
         )
         async with self._lock:
-            return await self._run_attack(case, cycle_id or self._cycle_id_for(case))
+            # Cleared inside the lock: `stop()` only sees that something holds
+            # it, so a stop pressed just after the last checkpoint of the
+            # previous run would otherwise stop this one before it began.
+            self._stop_requested = False
+            self._running = "attack"
+            try:
+                return await self._run_attack(
+                    case, cycle_id or self._cycle_id_for(case)
+                )
+            finally:
+                self._running = ""
 
     def _render(self, value: Any, cycle_id: str) -> Any:
         """Fill a definition's template variables for this run.
@@ -363,40 +470,71 @@ class Engine:
         has nothing to do with the participant's policy.
         """
         async with self._lock:
-            if RESET_BEFORE_EVALS:
-                await self._reset_plant("Reset before the evaluation suite.")
+            # Cleared inside the lock, before anything can check it: `stop()`
+            # only sees that the lock is held, so a stop pressed in the window
+            # after the previous run's last checkpoint would otherwise end
+            # this sweep before its first eval.
+            self._stop_requested = False
+            self._running = "evals"
+            try:
+                return await self._sweep()
+            finally:
+                self._running = ""
 
-            cycle_id = new_cycle_id()
-            cases = sorted(self.evals(), key=lambda c: not c.plants_canary)
-            events.emit(
-                kind="evals", phase="started", id="eval-sweep",
-                title="Evaluation suite", total=len(cases),
-                blurb=f"Running {len(cases)} evals against the agent.",
+    async def _sweep(self) -> dict[str, Any]:
+        """The sweep itself, with the lock already held."""
+        if RESET_BEFORE_EVALS:
+            await self._reset_plant("Reset before the evaluation suite.")
+
+        cycle_id = new_cycle_id()
+        cases = sorted(self.evals(), key=lambda c: not c.plants_canary)
+        events.emit(
+            kind="evals", phase="started", id="eval-sweep",
+            title="Evaluation suite", total=len(cases),
+            blurb=f"Running {len(cases)} evals against the agent.",
+        )
+        results: list[Outcome] = []
+        for index, case in enumerate(cases, start=1):
+            # Between evals, never inside one: an eval abandoned mid-judgement
+            # would be reported as a verdict nobody measured.
+            if self._stop_requested:
+                break
+            results.append(
+                await self._run_eval(case, cycle_id, index=index, total=len(cases))
             )
-            results = [await self._run_eval(c, cycle_id) for c in cases]
 
-            passed = sum(1 for r in results if r.outcome == "passed")
-            inconclusive = [r for r in results if not r.conclusive]
-            summary = {
-                "kind": "evals",
-                "phase": "resolved",
-                "id": "eval-sweep",
-                "title": "Evaluation suite",
-                "passed": passed,
-                "total": len(results),
-                "inconclusive": len(inconclusive),
-                "results": [
-                    {
-                        "id": r.case_id,
-                        "title": r.title,
-                        "outcome": r.outcome,
-                        "detail": r.detail,
-                        "session_id": r.session_id,
-                    }
-                    for r in results
-                ],
-            }
-            return summary
+        not_run = cases[len(results):]
+        passed = sum(1 for r in results if r.outcome == "passed")
+        inconclusive = [r for r in results if not r.conclusive]
+        summary = {
+            "kind": "evals",
+            "phase": "resolved",
+            "id": "eval-sweep",
+            "title": "Evaluation suite",
+            "passed": passed,
+            "total": len(results),
+            "inconclusive": len(inconclusive),
+            # From what was left undone, not from the flag: a stop pressed as
+            # the last eval resolved cut nothing short, and a card that says
+            # "stopped" about a suite that ran in full is a lie in the cheap
+            # direction.
+            "stopped": bool(not_run),
+            # Named, and deliberately kept out of `results`: a never-run eval
+            # folded in there would be counted by mlflow_run as an eval that
+            # ran and left no trace, which is the opposite of what happened.
+            "notRun": [{"id": c.id, "title": c.title} for c in not_run],
+            "results": [
+                {
+                    "id": r.case_id,
+                    "title": r.title,
+                    "outcome": r.outcome,
+                    "detail": r.detail,
+                    "session_id": r.session_id,
+                }
+                for r in results
+            ],
+        }
+        return summary
 
     # -- internals ---------------------------------------------------------
 
@@ -521,6 +659,7 @@ class Engine:
                 persona=self.PROBE_PERSONA,
                 session_id=session,
                 on_turn=self._echo(session, case),
+                should_stop=lambda: self._stop_requested,
             )
             result.session_id = turn.session_id
             if not turn.ok:
@@ -558,6 +697,14 @@ class Engine:
                 result.detail = (
                     f"{detail} — but nothing refused the request; the agent "
                     "chose not to comply, so your policy was never exercised"
+                )
+            if turn.stopped:
+                # Said in front of the verdict, because the verdict is now
+                # about a shorter attack than the definition describes: the
+                # turns that were never sent might have landed.
+                result.detail = (
+                    "stopped by the operator part-way through — "
+                    + result.detail
                 )
             return result
         except Exception as exc:  # noqa: BLE001 - a probe must never kill the loop
@@ -623,7 +770,18 @@ class Engine:
             kind="trace", id=case.id, session=session, traceUrl=url,
         )
 
-    async def _run_eval(self, case: Case, cycle_id: str) -> Outcome:
+    async def _run_eval(
+        self, case: Case, cycle_id: str, *, index: int = 0, total: int = 0
+    ) -> Outcome:
+        # Said before the work, like every other probe: a sweep of six behind
+        # one unchanging "this takes a minute" is indistinguishable from a
+        # console that hung. `index` counts in the order the sweep runs them,
+        # which is not the catalogue order -- canary planters go first -- so
+        # "3 of 6" names the eval actually running.
+        events.emit(
+            kind="eval", phase="started", id=case.id, title=case.title,
+            severity=case.severity, index=index, total=total,
+        )
         spec = self._render(case.goal, cycle_id)
         prompts = [self._render(p, cycle_id) for p in case.prompts]
         result = Outcome(case.id, case.title)
@@ -633,6 +791,15 @@ class Engine:
         if spec.get("type") == "state_created":
             before_count = await goals._count(
                 self._client, self._plant_api_url, spec.get("collection", "work-orders")
+            )
+        # Which reports were already there. Taken before the prompt goes out,
+        # because "a report appeared" is a delta and the directory is not
+        # empty to start with -- the console seeds one and the participant
+        # may have written others.
+        before_files: set[str] | None = None
+        if spec.get("type") == "fs_created":
+            before_files = await goals.fs_list(
+                self._agent_pod_selector, self._agent_pod_container
             )
 
         try:
@@ -645,7 +812,8 @@ class Engine:
                 return result
 
             verdict = await self._judge(
-                spec, turn, before, cycle_id, before_count=before_count
+                spec, turn, before, cycle_id,
+                before_count=before_count, before_files=before_files,
             )
             if verdict is None:
                 result.detail = "could not be judged"
@@ -716,6 +884,7 @@ class Engine:
         cycle_id: str,
         *,
         before_count: int = -1,
+        before_files: set[str] | None = None,
         since: float = 0.0,
     ) -> goals.Verdict:
         """Dispatch to the goal checker the case declares."""
@@ -786,6 +955,14 @@ class Engine:
                 return None
             ok, detail = verdict
             return ok, f"{detail} (reported by the agent, not measured)"
+
+        if kind == "fs_created":
+            # Looked at, like fs_probe, and for the same reason: asking the
+            # agent whether it wrote a file is asking the thing under test.
+            after = await goals.fs_list(
+                self._agent_pod_selector, self._agent_pod_container
+            )
+            return goals.fs_created(before_files, after)
 
         if kind == "honeypot_hit":
             return await goals.honeypot_hit(
