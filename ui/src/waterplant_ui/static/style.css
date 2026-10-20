@@ -598,6 +598,16 @@ body {
   background: linear-gradient(180deg, #3a2c17, #1d150a);
   color: #7a5f34; cursor: not-allowed; box-shadow: inset 0 1px 0 rgba(255,255,255,.06);
 }
+/* Send, while the agent has the floor. Red rather than phosphor: it is the
+   one control on this screen that interrupts something, and it should not
+   look like the button that started it. */
+.composer button.stopping {
+  color: #ffd9d3;
+  background: linear-gradient(180deg, #7a2a22 0%, #5a1d17 52%, #451410 100%);
+  border-color: rgba(255, 77, 61, .75);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.18), 0 0 10px rgba(255, 77, 61, .25);
+}
+.composer button.stopping:hover { filter: brightness(1.25); }
 .composer input:focus-visible, .composer button:focus-visible, .persona:focus-visible {
   outline: 2px solid var(--phos); outline-offset: 2px;
 }

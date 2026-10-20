@@ -929,6 +929,16 @@ function clearTranscript(reason) {
  * than appended, which is what keeps it at the foot of the transcript
  * without having to move it.
  */
+/* The turn in flight, or null. Held at module scope because the Send button
+ * doubles as Stop and has to reach it from its own click handler.
+ *
+ * Aborting the fetch is the whole mechanism: Hermes interrupts the agent when
+ * its SSE client goes away ("SSE client disconnected; interrupted agent task",
+ * then "reason=interrupted_by_user"), and closing the browser's stream closes
+ * the BFF's upstream one behind it. Verified end to end against a live agent —
+ * no stop endpoint is called and the BFF needs no say in it. */
+let inFlight = null;
+
 let pendingTimer = null;
 let pendingLine = null;
 /* The indicator's own render function, held so a tool frame can repaint the
@@ -1025,6 +1035,27 @@ function stopPending() {
   $("chat")?.querySelector(".line.pending")?.remove();
 }
 
+/* Send becomes Stop while the agent has the floor.
+ *
+ * Not disabled, as it was: a turn here runs for a minute or more through a
+ * shared model endpoint, and a participant who has seen the agent take a wrong
+ * turn should not have to sit through the rest of it. The button is the
+ * obvious place for that, and it is the one control already under their hand.
+ *
+ * `type` moves with the label so Enter in the prompt cannot trigger a Stop,
+ * and `ask` refuses to start a second turn while one is running. */
+function setSendMode(stopping) {
+  const send = $("send");
+  if (!send) return;  // pragma: no cover - the composer is always present
+  send.textContent = stopping ? "Stop" : "Send";
+  send.type = stopping ? "button" : "submit";
+  send.classList.toggle("stopping", stopping);
+  send.title = stopping
+    ? "Stop the agent. It keeps whatever it has already said."
+    : "";
+  send.disabled = stopping ? false : !agentAvailable;
+}
+
 function remember(role, content) {
   const text = (content || "").trim();
   if (!text) return;
@@ -1055,13 +1086,18 @@ function forget(role, content) {
  */
 async function ask(event) {
   event.preventDefault();
+  /* One turn at a time. The button says Stop while a turn is running, but
+   * Enter in the prompt still submits the form, and a second turn started
+   * underneath the first would share its reply line and its history. */
+  if (inFlight) return;
   const input = $("prompt");
   const message = input.value.trim();
   if (!message) return;
 
   addMessage("user", message);
   input.value = "";
-  $("send").disabled = true;
+  inFlight = new AbortController();
+  setSendMode(true);
 
   // Snapshot before the new turn joins it, so the question is not also in the
   // history the request replays.
@@ -1181,6 +1217,7 @@ async function ask(event) {
         history: priorTurns,
         conversationId,
       }),
+      signal: inFlight.signal,
     });
 
     if (!res.ok || !res.body) {
@@ -1251,7 +1288,12 @@ async function ask(event) {
       }
     }
   } catch (err) {
-    addMessage("system", `Could not reach the assistant: ${err.message}`);
+    /* A stop is not a fault. The operator asked for it, and the agent was
+     * interrupted rather than broken -- reporting it as "could not reach the
+     * assistant" would read as the infrastructure failing in exactly the
+     * module where the infrastructure is what they are inspecting. */
+    if (err.name === "AbortError") addMessage("system", "Stopped.");
+    else addMessage("system", `Could not reach the assistant: ${err.message}`);
   } finally {
     // Recorded here rather than on the "done" event so a turn cut short by a
     // rate limit or a dropped stream still leaves behind what was actually
@@ -1268,7 +1310,8 @@ async function ask(event) {
     // and the prompt is waiting.
     chat.scrollTop = chat.scrollHeight;
 
-    $("send").disabled = !agentAvailable;
+    inFlight = null;
+    setSendMode(false);
     input.focus();
   }
 }
@@ -1334,6 +1377,13 @@ async function ask(event) {
   $("run-attack").addEventListener("click", runAttack);
   $("run-evals").addEventListener("click", runEvals);
   $("reset-plant").addEventListener("click", resetPlant);
+  /* Stop, when the button is in that mode. In Send mode it is a submit button
+   * and the form's own handler takes it, so this only ever fires for a stop. */
+  $("send").addEventListener("click", (e) => {
+    if (!inFlight) return;
+    e.preventDefault();
+    inFlight.abort();
+  });
 
   /* Escape clears the lot. With several results stacked up, dismissing them
    * one × at a time is busywork, and the composer is the only other thing on
