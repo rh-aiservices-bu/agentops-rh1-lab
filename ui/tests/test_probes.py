@@ -1157,6 +1157,122 @@ async def test_the_sweep_actually_resolves_and_records_its_traces(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_each_eval_verdict_lands_on_its_own_trace(monkeypatch):
+    """Without this a sweep's traces are indistinguishable in MLflow.
+
+    The run carries the verdicts as metrics and the traces carry nothing, so
+    the Evaluations tab shows one `OK` per row -- the *trace* state, true of a
+    failed eval as much as a passed one. Observed on cluster-zwtpw: a sweep
+    with eval.write_report at 0.0 whose rows all read OK.
+    """
+    from waterplant_ui.probes import mlflow_run
+
+    posted: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/experiments/get-by-name"):
+            return httpx.Response(200, json={"experiment": {"experiment_id": "7"}})
+        body = json.loads(request.read() or b"{}")
+        if path.endswith("/traces/search"):
+            return httpx.Response(200, json={"traces": [
+                {"trace_id": "tr-pass", "trace_metadata": {"mlflow.trace.session": "s-pass"}},
+                {"trace_id": "tr-fail", "trace_metadata": {"mlflow.trace.session": "s-fail"}},
+                {"trace_id": "tr-incon", "trace_metadata": {"mlflow.trace.session": "s-incon"}},
+            ]})
+        if path.endswith("/runs/create"):
+            return httpx.Response(200, json={"run": {"info": {"run_id": "run-9"}}})
+        posted.append((path, body))
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(mlflow_run, "MLFLOW_API_URL", "http://mlflow")
+    monkeypatch.setattr(mlflow_run, "EXPERIMENT", "user-x")
+    monkeypatch.setattr(mlflow_run, "NAMESPACE", "user-x-agentops")
+
+    summary = {"passed": 1, "total": 4, "results": [
+        {"id": "telemetry-lookup", "title": "T", "outcome": "passed",
+         "detail": "read it back", "session_id": "s-pass"},
+        {"id": "write-report", "title": "W", "outcome": "failed",
+         "detail": "canary absent", "session_id": "s-fail"},
+        {"id": "doc-read", "title": "D", "outcome": "inconclusive",
+         "detail": "observer blind", "session_id": "s-incon"},
+        # Ran and was scored, but its trace never arrived.
+        {"id": "golden-workflow", "title": "G", "outcome": "passed",
+         "detail": "ok", "session_id": "s-none"},
+    ]}
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    await mlflow_run._write(client, summary)
+
+    assessed = {}
+    for path, body in posted:
+        if "/assessments" in path:
+            a = body["assessment"]
+            assessed[a["trace_id"]] = (a["assessment_name"], a["feedback"]["value"], a["rationale"])
+
+    # One per trace, carrying the verdict a participant needs to see. A real
+    # boolean, not the word: the Evaluations tab summarises a true/false
+    # column as a pass rate.
+    assert assessed["tr-pass"][1] is True
+    assert assessed["tr-fail"][1] is False
+    # An eval that could not be judged counts as a failure in the column...
+    assert assessed["tr-incon"][1] is False
+    # ...but says so in the rationale, so it stays distinguishable from one
+    # the participant actually failed.
+    assert assessed["tr-incon"][2] == "inconclusive: observer blind"
+    # The column header a participant reads is the assessment name.
+    assert {v[0] for v in assessed.values()} == {"eval_result"}
+    # The reason travels with the verdict.
+    assert assessed["tr-fail"][2] == "canary absent"
+    # Nothing invented for the eval whose trace never arrived.
+    assert len(assessed) == 3
+
+
+@pytest.mark.asyncio
+async def test_an_eval_without_a_trace_is_named_on_the_run(monkeypatch):
+    """A sweep of six that links five must not look like a sweep of five.
+
+    The gap is not always a slow exporter: observed on cluster-zwtpw, an eval
+    that passed whose trace had still not appeared a day later.
+    """
+    from waterplant_ui.probes import mlflow_run
+
+    posted: list = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/experiments/get-by-name"):
+            return httpx.Response(200, json={"experiment": {"experiment_id": "7"}})
+        body = json.loads(request.read() or b"{}")
+        if path.endswith("/traces/search"):
+            return httpx.Response(200, json={"traces": [
+                {"trace_id": "tr-a", "trace_metadata": {"mlflow.trace.session": "s-a"}},
+            ]})
+        if path.endswith("/runs/create"):
+            return httpx.Response(200, json={"run": {"info": {"run_id": "run-9"}}})
+        posted.append((path, body))
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(mlflow_run, "MLFLOW_API_URL", "http://mlflow")
+    monkeypatch.setattr(mlflow_run, "EXPERIMENT", "user-x")
+    monkeypatch.setattr(mlflow_run, "NAMESPACE", "user-x-agentops")
+    monkeypatch.setattr(mlflow_run, "TRACE_LOOKUP_SECONDS", 0.0)
+
+    summary = {"passed": 2, "total": 2, "results": [
+        {"id": "has-trace", "title": "A", "outcome": "passed", "detail": "d",
+         "session_id": "s-a"},
+        {"id": "telemetry-lookup", "title": "B", "outcome": "passed", "detail": "d",
+         "session_id": "s-missing"},
+    ]}
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    await mlflow_run._write(client, summary)
+
+    batch = [b for p_, b in posted if p_.endswith("/runs/log-batch")][0]
+    tags = {t["key"]: t["value"] for t in batch["tags"]}
+    assert tags["trace.has-trace"] == "tr-a"
+    assert tags["traces.missing"] == "telemetry-lookup"
+
+
+@pytest.mark.asyncio
 async def test_trace_lookup_waits_for_the_exporter_then_gives_up(monkeypatch):
     """The sweep's traces are rarely there the instant it finishes.
 

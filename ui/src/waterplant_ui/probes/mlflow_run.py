@@ -189,6 +189,80 @@ async def find_traces_by_session(
     return found
 
 
+#: What the verdict column is called in MLflow's Evaluations tab. The
+#: assessment's name *is* the column header, so it is read by participants and
+#: not only by this code.
+ASSESSMENT_NAME = "eval_result"
+
+#: The eval outcome as a pass/fail boolean, which is what the Evaluations tab
+#: charts: a true/false column summarises as a pass rate, where a third string
+#: value only splits the bar three ways.
+#:
+#: An inconclusive eval counts as false. The engine keeps it separate from a
+#: failure on purpose -- it means the check could not be judged, not that the
+#: participant broke something -- so the distinction is carried in the
+#: rationale instead, where it is read beside the verdict rather than lost.
+_VERDICT = {"passed": True, "failed": False, "inconclusive": False}
+
+
+async def _log_assessments(
+    client: httpx.AsyncClient, results: list[dict[str, Any]]
+) -> None:
+    """Put each eval's verdict on its own trace.
+
+    Without this a sweep's traces are indistinguishable in MLflow. The run
+    carries the verdicts as metrics (`eval.<id>` 1.0/0.0) and the traces carry
+    nothing, so the Evaluations tab shows one `OK` per row -- which is the
+    *trace* state, meaning the turn completed without raising, and is true of a
+    failed eval just as much as a passed one. Observed on cluster-zwtpw: a
+    sweep with `eval.write_report` at 0.0 whose five rows all read OK, with no
+    way to tell which had failed.
+
+    An assessment is what that tab reads. Posting one per trace gives the
+    column its values, so a failure is visible where a participant is already
+    looking rather than only in the run's metrics.
+
+    Best effort, and deliberately after the run is written: a sweep that ran is
+    a sweep that counts, and a verdict that could not be attached must not cost
+    the scorecard that already has it.
+    """
+    for r in results:
+        trace_id = r.get("trace_id")
+        outcome = r.get("outcome", "")
+        if not trace_id or outcome not in _VERDICT:
+            continue
+        verdict = _VERDICT[outcome]
+        # Why it could not be judged, kept where the false it produced is
+        # read. Without this an inconclusive eval is indistinguishable from
+        # one the participant actually failed.
+        rationale = (r.get("detail") or "")[:400]
+        if outcome == "inconclusive":
+            rationale = f"inconclusive: {rationale}" if rationale else "inconclusive"
+        try:
+            response = await client.post(
+                _api3(f"/traces/{trace_id}/assessments"),
+                json={
+                    "assessment": {
+                        "trace_id": trace_id,
+                        "assessment_name": ASSESSMENT_NAME,
+                        "source": {
+                            "source_type": "CODE",
+                            "source_id": "waterplant-console",
+                        },
+                        "feedback": {"value": verdict},
+                        "rationale": rationale,
+                    }
+                },
+                headers=_headers(),
+                timeout=15.0,
+            )
+            response.raise_for_status()
+        except (httpx.HTTPError, ValueError) as exc:
+            log.warning(
+                "mlflow assessment for eval %s failed: %s", r.get("id"), exc
+            )
+
+
 async def _link_traces(
     client: httpx.AsyncClient, run_id: str, trace_ids: list[str]
 ) -> bool:
@@ -389,6 +463,14 @@ async def _write(client: httpx.AsyncClient, summary: dict[str, Any]) -> str | No
             for r in summary["results"]
             if r.get("trace_id")
         ]
+        # Which evals ran without leaving a trace, named rather than simply
+        # absent. A sweep of six that links five is indistinguishable from a
+        # sweep of five unless the omission is written down, and the gap is
+        # not always the exporter being slow: observed on cluster-zwtpw, an
+        # eval that passed whose trace had still not appeared a day later.
+        missing = [r["id"] for r in summary["results"] if not r.get("trace_id")]
+        if missing:
+            tags.append({"key": "traces.missing", "value": ",".join(missing)[:400]})
 
         await client.post(
             _api("/runs/log-batch"),
@@ -402,6 +484,8 @@ async def _write(client: httpx.AsyncClient, summary: dict[str, Any]) -> str | No
             headers=_headers(),
             timeout=15.0,
         )
+        # After the run is final, so a failure here cannot lose the sweep.
+        await _log_assessments(client, summary["results"])
         # Built from MLFLOW_URL, not MLFLOW_API_URL: this one is for a human
         # with a browser and an OpenShift session, not for this process.
         #

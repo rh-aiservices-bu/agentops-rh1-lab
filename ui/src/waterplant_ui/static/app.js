@@ -672,12 +672,14 @@ function handleEvalEvent(ev) {
   const rows = (ev.results || [])
     .map((r) => {
       const o = OUTCOME[r.outcome] || OUTCOME.inconclusive;
-      /* Each eval links to its own trace. MLflow's Evaluations tab on the run
-       * cannot show these — see probes/mlflow_run.py — so the scorecard is
-       * where the connection is made. */
+      /* Each eval links to its own trace, and says so when there is none.
+       * A silently absent link reads as a scorecard that forgot one, which is
+       * worse than the truth: the turn ran and was scored, but its trace was
+       * never exported, so there is nothing to open. The attack toast has
+       * always said this; the scorecard used to just leave the link out. */
       const link = r.traceUrl
         ? ` <a class="t-trace" href="${esc(r.traceUrl)}" target="_blank" rel="noopener">trace →</a>`
-        : "";
+        : ` <span class="t-trace none">no trace</span>`;
       return `<li class="${o.cls}"><span class="m">${o.mark}</span>
         <span class="n">${esc(r.title)}${link}</span>
         <span class="d">${esc(r.detail)}</span></li>`;
