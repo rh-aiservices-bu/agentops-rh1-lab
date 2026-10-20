@@ -44,12 +44,33 @@ RUN git clone --depth 1 https://github.com/RHRolun/hermes-agent.git /tmp/hermes-
 # mcp.client.streamable_http — without it, MCP servers configured with
 # streamable-http transport fail with "requires HTTP transport but
 # mcp.client.streamable_http is not available" (confirmed live against a real
-# deployment). Pinned to exactly the versions hermes-agent 0.17.0 declares for
-# its own [mcp] extra (`mcp==1.26.0; extra == "mcp"`,
-# `starlette==1.0.1; extra == "mcp"`) rather than resolved through the extra
-# itself, matching the fix already validated in the sibling
+# deployment). Installed directly rather than resolved through hermes-agent's
+# [mcp] extra, matching the fix already validated in the sibling
 # quay.io/ckavili/hermes-mem0 image build.
-RUN pip3.12 install --no-cache-dir "mcp==1.26.0" "starlette==1.0.1" && \
+#
+# A fork of mcp 1.26.0 — the version hermes-agent 0.17.0 declares for that
+# extra (`mcp==1.26.0; extra == "mcp"`) — carrying one backported fix.
+#
+# Upstream's streamable-HTTP client answers 202 and 404 and calls
+# raise_for_status() on every other status. Each request is POSTed from its own
+# task, so that exception unwinds the transport's task group and takes the
+# session's receive loop with it, including the only code that would have told
+# the waiting request anything. The caller then waits out its read timeout —
+# five seconds, in hermes-agent — and the session is gone. The status code and
+# the server's error body are never read.
+#
+# That is what a denied tool looks like in module 3: MCP Gateway refuses on the
+# caller's token with a perfectly good "Forbidden: Insufficient permissions for
+# this tool.", and Hermes reports a timeout and calls it a network outage.
+#
+# Reported upstream as modelcontextprotocol/python-sdk#2110 (still open) and
+# fixed in the 2.x line. 2.x is not an upgrade we can take: it replaced httpx
+# with httpx2 and moved types to a separate mcp_types package, and hermes-agent
+# uses neither. So the 2.x fix is backported onto 1.26.0 instead. Drop the fork
+# and go back to "mcp==1.26.0" once hermes-agent moves to 2.x.
+#
+# Pinned to a commit, not the branch, like every other version in this image.
+RUN pip3.12 install --no-cache-dir "mcp @ git+https://github.com/RHRolun/python-sdk@53dee7398557b9b7ca52973ee535ff97e12f98e4" "starlette==1.0.1" && \
     python3.12 -c "import mcp.client.streamable_http"
 
 # Extra deps from cai-krew build (otel, whisper, yaml)

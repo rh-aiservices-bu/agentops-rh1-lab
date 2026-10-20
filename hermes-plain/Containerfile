@@ -33,6 +33,23 @@ RUN python -m venv /opt/hermes/venv
 ENV PATH="/opt/hermes/venv/bin:$PATH"
 RUN pip install --no-cache-dir ".[slack]" ".[mcp]"
 
+# Replace the mcp the [mcp] extra just resolved (1.26.0) with a fork of it
+# carrying one backported fix: upstream's streamable-HTTP client raises on any
+# non-2xx POST other than 404, which unwinds the transport's task group and
+# leaves the waiting tool call to time out with the session gone — so a gateway
+# refusing a tool on the caller's token reads as a network outage rather than a
+# denial. Reported as modelcontextprotocol/python-sdk#2110, fixed in 2.x, and
+# 2.x is not an upgrade hermes-agent can take (httpx -> httpx2, mcp.types ->
+# mcp_types). See hermes-openshell/Containerfile for the long version.
+#
+# --no-deps so the fork cannot resolve a different dependency set than the
+# extra above already settled on; the fork changes one file and no metadata.
+# Pinned to a commit, not the branch. Drop this and the fork once hermes-agent
+# moves to mcp 2.x.
+RUN pip install --no-cache-dir --no-deps --force-reinstall \
+    "mcp @ git+https://github.com/RHRolun/python-sdk@53dee7398557b9b7ca52973ee535ff97e12f98e4" && \
+    python -c "import mcp.client.streamable_http"
+
 # Install common Python deps used by Hermes tools
 RUN pip install --no-cache-dir \
     pyyaml \
