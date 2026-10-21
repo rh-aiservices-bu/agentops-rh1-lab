@@ -957,8 +957,14 @@ async function runEvals() {
 }
 
 /* ── assistant ───────────────────────────────────────────── */
+/* The identity picker is gone from the header: every request now asks as the
+   plant operator, which is the one identity the lab's scenarios are written
+   against. Kept as a function so the sigil, the transcript prompt and the
+   request body all name the same identity from one place. */
+const PERSONA = "operator";
+
 function personaSlug() {
-  return $("persona").value;
+  return PERSONA;
 }
 
 /* Terminal lines rather than chat bubbles: on a phosphor screen, a bubble
@@ -989,10 +995,8 @@ function addMessage(role, text, persona) {
   if (role === "user") {
     const p = document.createElement("span");
     p.className = "prompt";
-    /* `persona` is passed only for an echoed attack turn, which always asks
-       as the operator. Falling back to the picker would label the attack with
-       whichever identity the participant happens to have selected — wrong
-       about exactly the thing the identity attacks are testing. */
+    /* `persona` is passed only for an echoed attack turn, which carries the
+       identity it asked as; typed turns fall back to the console's own. */
     p.textContent = `${persona || personaSlug()}@northgate ~ % `;
     line.appendChild(p);
   } else if (role === "system") {
@@ -1374,7 +1378,7 @@ async function ask(event) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         message,
-        persona: $("persona").value,
+        persona: PERSONA,
         history: priorTurns,
         conversationId,
       }),
@@ -1507,9 +1511,7 @@ async function ask(event) {
       el.hidden = !showTrace;
     });
   });
-  const syncSigil = () => { $("sigil").textContent = `${personaSlug()}@northgate ~ %`; };
-  $("persona").addEventListener("change", syncSigil);
-  syncSigil();
+  $("sigil").textContent = `${personaSlug()}@northgate ~ %`;
 
   try {
     const cfg = await (await fetch("/api/config")).json();
