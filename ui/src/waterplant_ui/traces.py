@@ -144,6 +144,47 @@ def landing_url() -> str:
     return f"{MLFLOW_URL}/experiments?workspace={WORKSPACE}"
 
 
+async def experiment_id() -> str:
+    """This participant's experiment id, or "" when it cannot be resolved.
+
+    The one way either link gets an id. Both the per-turn "see the trace"
+    link and the footer's traces link need it, under the same preconditions
+    and with the same answer: a second path would be a second way for them
+    to disagree about which experiment is the participant's. Cached for the
+    process by `_resolve_experiment_id` — the experiment is created once per
+    participant and does not change under a running console.
+    """
+    if not enabled():
+        return ""
+    token = _token()
+    if not token:
+        return ""
+    try:
+        return await _resolve_experiment_id(token)
+    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+        # A console that cannot reach MLflow is still a working console.
+        return ""
+
+
+async def traces_tab_url() -> str:
+    """Where the footer link goes: this participant's own Traces tab.
+
+    `landing_url` is the experiment *list*, which is one more click and one
+    more decision than a link labelled "MLflow traces" promises — and a
+    participant who has never opened MLflow does not know which row is
+    theirs. The list stays as the fallback, because the tab needs an id and
+    an id can only be resolved over the API: when that fails the link still
+    lands somewhere true rather than on a 404 built from a guess.
+    """
+    if not MLFLOW_URL:
+        return ""
+    found = await experiment_id()
+    if not found:
+        return landing_url()
+    query = f"?workspace={WORKSPACE}" if WORKSPACE else ""
+    return f"{MLFLOW_URL}/experiments/{found}/traces{query}"
+
+
 def trace_url(trace_id: str, experiment_id: str) -> str:
     """A link that opens this exact trace.
 
@@ -260,16 +301,18 @@ async def find_trace(message: str, started_ms: int) -> tuple[str, str] | None:
     token = _token()
     if not token:
         return None
+    # The same resolver the footer link uses, so the two can never point at
+    # different experiments.
+    found = await experiment_id()
+    if not found:
+        return None
     try:
-        experiment_id = await _resolve_experiment_id(token)
-        if not experiment_id:
-            return None
         deadline = time.monotonic() + LOOKUP_SECONDS
         since_ms = max(0, started_ms - WINDOW_MS)
         while True:
-            for trace in await _search(token, experiment_id, since_ms):
+            for trace in await _search(token, found, since_ms):
                 if _matches(trace, message) and trace.get("trace_id"):
-                    return trace["trace_id"], experiment_id
+                    return trace["trace_id"], found
             if time.monotonic() >= deadline:
                 return None
             await asyncio.sleep(LOOKUP_INTERVAL_S)

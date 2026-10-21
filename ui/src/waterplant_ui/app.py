@@ -175,12 +175,13 @@ async def config() -> dict[str, Any]:
     """What the front end needs to know about its environment."""
     return {
         "agentAvailable": bool(AGENT_URL),
-        # The footer link. A landing page, not the bare base: traces.py scopes
-        # it to this participant's workspace and points it at the experiment
-        # list, because a bare base opens whatever workspace the browser
-        # session last used and shows an empty table. Built here rather than
-        # in app.js so the whole MLflow link vocabulary stays in one module.
-        "mlflowUrl": traces.landing_url(),
+        # The footer link. The participant's own Traces tab, scoped to their
+        # workspace: a bare base opens whatever workspace the browser session
+        # last used and shows an empty table, and the experiment list is a
+        # click short of what the link says it opens. Falls back to the list
+        # when the experiment id cannot be resolved. Built here rather than in
+        # app.js so the whole MLflow link vocabulary stays in one module.
+        "mlflowUrl": await traces.traces_tab_url(),
         "namespace": os.environ.get("NAMESPACE", ""),
         # Which harness is behind the chat pane, and what it costs. Both are
         # reported rather than hidden: a participant told to inspect a trace or

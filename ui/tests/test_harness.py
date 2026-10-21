@@ -1340,3 +1340,101 @@ def test_the_sweep_returns_its_scorecard_before_mlflow_is_written(monkeypatch):
     assert traces, "the links never arrived"
     assert traces[0]["mlflowRunUrl"] == "https://mlflow.example/run"
     assert traces[0]["results"][0]["traceUrl"] == "https://mlflow.example/t/1"
+
+
+# -- the footer's MLflow link -------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_footer_link_opens_the_participants_traces(monkeypatch, tmp_path):
+    """"MLflow traces →" should open traces, not a list of experiments.
+
+    The experiment list is one more click and one more decision than a link
+    with that label promises, and a participant who has never seen MLflow
+    does not know which row is theirs.
+    """
+    from waterplant_ui import traces as traces_mod
+
+    token = tmp_path / "token"
+    token.write_text("t0ken")
+    monkeypatch.setattr(traces_mod, "MLFLOW_URL", "https://rh-ai.example/develop-train/mlflow")
+    monkeypatch.setattr(traces_mod, "WORKSPACE", "user-x-agentops")
+    monkeypatch.setattr(traces_mod, "EXPERIMENT_NAME", "user-x")
+    monkeypatch.setattr(traces_mod, "TOKEN_FILE", str(token))
+    monkeypatch.setattr(traces_mod, "_experiment_id", "2")
+
+    assert await traces_mod.traces_tab_url() == (
+        "https://rh-ai.example/develop-train/mlflow/experiments/2/traces"
+        "?workspace=user-x-agentops"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unresolvable_experiment_still_links_somewhere_true(monkeypatch, tmp_path):
+    """MLflow unreachable is not a reason to hand out a URL built from a guess.
+
+    The experiment list is scoped to the workspace and always exists, so it
+    beats an `/experiments//traces` that 404s.
+    """
+    from waterplant_ui import traces as traces_mod
+
+    token = tmp_path / "token"
+    token.write_text("t0ken")
+    monkeypatch.setattr(traces_mod, "MLFLOW_URL", "https://rh-ai.example/develop-train/mlflow")
+    monkeypatch.setattr(traces_mod, "WORKSPACE", "user-x-agentops")
+    monkeypatch.setattr(traces_mod, "EXPERIMENT_NAME", "user-x")
+    monkeypatch.setattr(traces_mod, "TOKEN_FILE", str(token))
+    monkeypatch.setattr(traces_mod, "_experiment_id", None)
+
+    async def refuse(_token):
+        raise httpx.ConnectError("mlflow is down")
+
+    monkeypatch.setattr(traces_mod, "_resolve_experiment_id", refuse)
+
+    assert await traces_mod.traces_tab_url() == (
+        "https://rh-ai.example/develop-train/mlflow/experiments?workspace=user-x-agentops"
+    )
+
+
+@pytest.mark.asyncio
+async def test_both_mlflow_links_resolve_the_experiment_the_same_way(
+    monkeypatch, tmp_path
+):
+    """One resolver, so the footer and the per-turn link cannot disagree.
+
+    They are the two links a participant compares when a trace is missing;
+    pointing them at different experiments would make that comparison lie.
+    """
+    from waterplant_ui import traces as traces_mod
+
+    token = tmp_path / "token"
+    token.write_text("t0ken")
+    monkeypatch.setattr(traces_mod, "MLFLOW_URL", "https://rh-ai.example/develop-train/mlflow")
+    monkeypatch.setattr(traces_mod, "WORKSPACE", "user-x-agentops")
+    monkeypatch.setattr(traces_mod, "EXPERIMENT_NAME", "user-x")
+    monkeypatch.setattr(traces_mod, "TOKEN_FILE", str(token))
+    monkeypatch.setattr(traces_mod, "_experiment_id", None)
+
+    asked = []
+
+    async def resolve(_token):
+        asked.append("resolve")
+        return "7"
+
+    monkeypatch.setattr(traces_mod, "_resolve_experiment_id", resolve)
+
+    async def one_trace(_token, exp_id, _since):
+        asked.append(f"search:{exp_id}")
+        return [{"trace_id": "tr-1", "request_preview": '"hello"'}]
+
+    monkeypatch.setattr(traces_mod, "_search", one_trace)
+
+    footer = await traces_mod.traces_tab_url()
+    found = await traces_mod.find_trace("hello", 0)
+
+    assert found == ("tr-1", "7")
+    # The same id in both links...
+    assert "/experiments/7/traces" in footer
+    assert "/experiments/7/traces" in traces_mod.trace_url(*found)
+    # ...and the per-turn lookup searched that experiment, not another.
+    assert "search:7" in asked
