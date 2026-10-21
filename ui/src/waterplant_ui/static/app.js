@@ -462,8 +462,14 @@ function toastEl(key) {
 /* Where the render functions write. */
 const toastBody = (el) => el.querySelector(".t-body");
 
+/* Keys the viewer has dismissed. A card they closed must not come back by
+ * itself -- but a card they have never seen must be allowed to appear, which
+ * is the difference between "do not resurrect" and "never create". */
+const dismissedToasts = new Set();
+
 function dismissToast(el) {
   el.classList.add("leaving");
+  for (const [k, v] of liveToasts) if (v === el) dismissedToasts.add(k);
   setTimeout(() => {
     el.remove();
     for (const [k, v] of liveToasts) if (v === el) liveToasts.delete(k);
@@ -784,7 +790,18 @@ function fillEvalTraces(ev) {
  * with a body and no header, rewritten by every tick for the rest of the
  * minute. */
 function handleEvalProgress(ev) {
-  const el = liveToasts.get("evals");
+  let el = liveToasts.get("evals");
+  if ((!el || !el.isConnected) && !dismissedToasts.has("evals")) {
+    /* Joined after the sweep began -- a reload, a second tab, or a console
+     * opened once it was already running. /api/state?eventsSince=-1 returns
+     * no backlog on purpose, so the `started` event that builds this card is
+     * never delivered to a page like that, and without this every tick for
+     * the rest of the sweep lands nowhere: the participant watches a console
+     * that looks idle while six evals run. The tick carries everything the
+     * card needs. */
+    handleEvalEvent({ phase: "started", total: ev.total });
+    el = liveToasts.get("evals");
+  }
   if (!el || !el.isConnected) return;
   const slot = toastBody(el).querySelector(".t-progress");
   if (!slot) return;
@@ -853,7 +870,20 @@ async function stopProbes() {
     if (!res.ok) throw new Error(body.detail || `HTTP ${res.status}`);
     /* Already finished between the poll and the click. An ordinary outcome,
      * not an error: the button's mode is up to a second old. */
-    if (body.stopping === false) syncProbeButtons("", false);
+    if (body.stopping === false) {
+      syncProbeButtons("", false);
+      return;
+    }
+    /* Say so when there is no card to say it on. A sweep started in another
+     * tab leaves this page with a Stop button and nothing else, and a click
+     * that asks the server to stop six evals must never look like a click
+     * that did nothing. */
+    if (!liveToasts.get("evals")) {
+      toastNotice(
+        "probe-stop", "unknown", "Stopping",
+        "The run will stop after the step now in progress."
+      );
+    }
   } catch (err) {
     toastNotice("probe-error", "unknown", "Could not stop", err.message);
     syncProbeButtons(was, false);

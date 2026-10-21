@@ -2850,6 +2850,39 @@ def test_the_sweep_card_has_a_line_for_the_eval_in_flight():
     assert "t-progress" in _static("style.css")
 
 
+def test_a_page_that_joins_a_running_sweep_still_sees_it():
+    """`eventsSince=-1` returns no backlog, by design.
+
+    So a reload, a second tab, or a console opened while a sweep is already
+    running never receives the `started` event that builds the card -- and
+    every progress tick for the rest of the sweep then lands nowhere. The
+    participant watches an idle-looking console while six evals run, presses
+    the button again, and (because the button is a Stop by then) silently
+    stops the sweep. Seen on user-vqfk9.
+    """
+    js = _static("app.js")
+
+    progress = js[js.index("function handleEvalProgress"):]
+    progress = progress[:progress.index("\n}\n")]
+    # It builds the card when there is none...
+    assert 'handleEvalEvent({ phase: "started"' in progress
+    # ...but never one the viewer closed themselves.
+    assert 'dismissedToasts.has("evals")' in progress
+    assert "dismissedToasts.add" in js
+
+
+def test_a_stop_is_visible_even_with_no_card_to_show_it_on():
+    """A sweep started in another tab leaves this page a Stop button and
+    nothing else. A click that stops six evals must not look like a click
+    that did nothing."""
+    js = _static("app.js")
+
+    stop_fn = js[js.index("async function stopProbes()"):]
+    stop_fn = stop_fn[:stop_fn.index("\n}\n")]
+    assert 'liveToasts.get("evals")' in stop_fn
+    assert "toastNotice(" in stop_fn
+
+
 def test_the_scorecard_says_it_is_still_waiting_for_mlflow():
     """The links arrive after the card now.
 
