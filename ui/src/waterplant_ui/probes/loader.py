@@ -44,6 +44,14 @@ _CYCLE_VAR = re.compile(r"\{\{\s*cycle_id\s*\}\}")
 #: prompt and in the transcript, rather than silently pointing at nothing.
 _DOCS_VAR = re.compile(r"\{\{\s*docs_url\s*\}\}")
 
+#: Where the agent the console is talking to keeps its files -- /app/.hermes
+#: for the plain agent, /sandbox/.hermes for the sandbox. Templated because
+#: it is decided at *runtime*, from AGENT_URL, which module 2 has the
+#: participant change: a definition that writes the path out is frozen to
+#: whichever agent existed when the chart rendered, and from module 2 on it
+#: names a file the agent in use does not have.
+_HOME_VAR = re.compile(r"\{\{\s*hermes_home\s*\}\}")
+
 
 @dataclass(frozen=True)
 class Case:
@@ -76,14 +84,18 @@ class Case:
         return [self.request.get("prompt", "")]
 
 
-def render(value: Any, cycle_id: str, docs_url: str = "") -> Any:
-    """Substitute {{ cycle_id }} and {{ docs_url }} through a nested structure."""
+def render(
+    value: Any, cycle_id: str, docs_url: str = "", hermes_home: str = ""
+) -> Any:
+    """Substitute {{ cycle_id }}, {{ docs_url }} and {{ hermes_home }}."""
     if isinstance(value, str):
-        return _DOCS_VAR.sub(docs_url.rstrip("/"), _CYCLE_VAR.sub(cycle_id, value))
+        rendered = _CYCLE_VAR.sub(cycle_id, value)
+        rendered = _DOCS_VAR.sub(docs_url.rstrip("/"), rendered)
+        return _HOME_VAR.sub(hermes_home.rstrip("/"), rendered)
     if isinstance(value, dict):
-        return {k: render(v, cycle_id, docs_url) for k, v in value.items()}
+        return {k: render(v, cycle_id, docs_url, hermes_home) for k, v in value.items()}
     if isinstance(value, list):
-        return [render(v, cycle_id, docs_url) for v in value]
+        return [render(v, cycle_id, docs_url, hermes_home) for v in value]
     return value
 
 

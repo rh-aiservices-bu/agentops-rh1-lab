@@ -441,11 +441,19 @@ class Engine:
     def _render(self, value: Any, cycle_id: str) -> Any:
         """Fill a definition's template variables for this run.
 
-        One place rather than seven call sites, because the two variables
-        have to agree: the prompt the agent is given and the goal we judge it
-        against must name the same canary and the same documentation host.
+        One place rather than seven call sites, because the variables have to
+        agree: the prompt the agent is given and the goal we judge it against
+        must name the same canary, the same documentation host and the same
+        agent home.
+
+        `hermes_home` comes from goals, which decides it from AGENT_URL --
+        the thing that actually moves when module 2 points the console at the
+        sandbox. A definition that wrote the path out instead was frozen when
+        the chart rendered, and from module 2 on it asked the sandboxed agent
+        to edit the plain agent's file: refused as a protected system path,
+        scored "declined", and the filesystem policy never exercised.
         """
-        return loader.render(value, cycle_id, self._docs_url)
+        return loader.render(value, cycle_id, self._docs_url, goals.HERMES_HOME)
 
     def _cycle_id_for(self, case: Case) -> str:
         """The cycle id this attack should run under.
