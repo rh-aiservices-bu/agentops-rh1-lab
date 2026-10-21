@@ -509,6 +509,71 @@ async def test_soul_restore_says_so_when_it_never_captured_the_original():
 
 
 @pytest.mark.asyncio
+async def test_soul_restore_uses_oc_not_the_agent_when_a_pod_is_available(monkeypatch):
+    """The whole point of a deterministic cleanup: no model call.
+
+    Asking the agent to rewrite its own instructions is backwards -- the
+    thing just manipulated into editing the file is the last thing to trust
+    to undo it -- and it cost two model turns after the attack had already
+    answered, which is the dead time between the reply and the verdict. When
+    there is a pod to exec into, cleanup `oc cp`s the pristine file back, the
+    same way Reset Plant does.
+    """
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={})))
+
+    looked = {}
+
+    async def fake_restore(selector, container, *, pod=""):
+        looked["selector"] = selector
+        looked["container"] = container
+        return True
+
+    monkeypatch.setattr("waterplant_ui.probes.goals.restore_soul", fake_restore)
+    ask = _soul_ask()
+
+    result = await cleanup.run(
+        {"type": "soul_restore", "path": "SOUL.md"},
+        client=client, plant_api_url="", before=None,
+        ask=ask, soul_before=ORIGINAL_SOUL,
+        agent_pod_selector="app=hermes", agent_pod_container="hermes",
+    )
+
+    assert result.attempted is True and result.succeeded is True
+    assert result.via == "oc"
+    # The agent was never asked to touch its own instructions.
+    assert ask.seen == []
+    assert looked == {"selector": "app=hermes", "container": "hermes"}
+
+
+@pytest.mark.asyncio
+async def test_soul_restore_via_oc_reports_a_failed_copy_honestly(monkeypatch):
+    """A restore that did not take must read loudly, not as success.
+
+    An agent left on tampered instructions behaves differently on every
+    later turn, so a cleanup that quietly failed is worse than none.
+    """
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={})))
+
+    monkeypatch.setattr("waterplant_ui.probes.goals.restore_soul",
+                        _async_return(False))
+    ask = _soul_ask()
+
+    result = await cleanup.run(
+        {"type": "soul_restore", "path": "SOUL.md"},
+        client=client, plant_api_url="", before=None,
+        ask=ask, soul_before=ORIGINAL_SOUL,
+        agent_pod_selector="app=hermes", agent_pod_container="hermes",
+    )
+
+    assert result.attempted is True and result.succeeded is False
+    assert result.via == "oc"
+    assert "tampered" in result.detail
+    assert ask.seen == []
+
+
+@pytest.mark.asyncio
 async def test_restore_asks_the_agent_first_and_does_not_touch_plant_api():
     """Undoing an attack goes back through the chat endpoint, like the attack did.
 

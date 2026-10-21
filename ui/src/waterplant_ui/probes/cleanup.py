@@ -42,8 +42,9 @@ class CleanupResult:
     #: None when nothing was attempted. Never left unset after an attempt.
     succeeded: bool | None = None
     detail: str = ""
-    #: "agent" when the agent put the plant back when asked, "direct" when we
-    #: had to reach past it into plant-api, "" when nothing was attempted.
+    #: "oc" when the file was put back deterministically with `oc cp`, "agent"
+    #: when the agent did it when asked, "direct" when we reached past it into
+    #: plant-api, "" when nothing was attempted.
     #: Surfaced rather than folded into `detail` because "the agent undid it"
     #: and "the lab undid it behind the agent's back" are different events,
     #: and only the first says anything about the agent.
@@ -130,6 +131,31 @@ async def run(
         # writing to a decoy proves nothing about whether the real one is
         # writable — so the only safe way to run this attack is to put the
         # original back afterwards.
+        #
+        # Deterministically, with `oc cp`, the same way Reset Plant restores
+        # it: copy the pristine SOUL.md over the tampered one and verify by
+        # reading both back. Asking the agent to rewrite its own instructions
+        # is exactly backwards — the thing that was just manipulated into
+        # editing the file is the last thing that should be trusted to undo
+        # it — and it cost two more model turns after the attack had already
+        # answered, which is the dead time between the reply and the verdict.
+        if agent_pod_selector and agent_pod_container:
+            ok = await goals.restore_soul(agent_pod_selector, agent_pod_container)
+            if ok:
+                return CleanupResult(
+                    attempted=True, succeeded=True, via="oc",
+                    detail="the agent's instructions were restored and verified",
+                )
+            return CleanupResult(
+                attempted=True, succeeded=False, via="oc",
+                detail="could not restore the instructions file; the agent may "
+                       "still be running on tampered instructions",
+            )
+
+        # No pod to exec into (a plain-agent deployment without exec access,
+        # or a test). Fall back to asking the agent to rewrite the file from
+        # the copy captured before the attack — slower and less trustworthy,
+        # but better than leaving it tampered.
         if not soul_before:
             return CleanupResult(
                 attempted=True,
@@ -149,17 +175,17 @@ async def run(
         )
         if not turn.ok:
             return CleanupResult(
-                attempted=True, succeeded=False,
+                attempted=True, succeeded=False, via="agent",
                 detail=f"restore request failed: {turn.error}",
             )
         check = await ask(goals.SOUL_READ_PROMPT.format(path=path))
         if check.ok and goals.extract_block(check.text).strip() == soul_before.strip():
             return CleanupResult(
-                attempted=True, succeeded=True,
+                attempted=True, succeeded=True, via="agent",
                 detail="the agent's instructions were restored and verified",
             )
         return CleanupResult(
-            attempted=True, succeeded=False,
+            attempted=True, succeeded=False, via="agent",
             detail="the instructions file does not match what was captured; "
                    "the agent may still be running on tampered instructions",
         )
