@@ -488,14 +488,6 @@ body {
  */
 .chat-plate { display: flex; flex-direction: column; }
 
-.persona {
-  font-family: var(--crt); font-size: calc(.95rem / var(--ui-scale)); letter-spacing: .06em;
-  text-transform: uppercase;
-  background: var(--crt-bg); color: var(--phos);
-  border: 1px solid rgba(0,0,0,.8); border-radius: 2px; padding: 2px 8px;
-  box-shadow: inset 0 2px 6px rgba(0,0,0,.9), 0 0 8px rgba(var(--phos-glow), .18);
-}
-
 /* The screen itself, recessed behind a bezel. */
 .crt {
   /* Was a clamped height, because the page scrolled and an unclamped panel
@@ -617,7 +609,7 @@ body {
   border-color: rgba(255, 77, 61, .75);
 }
 .act.stopping:hover:not(:disabled) { filter: brightness(1.25); }
-.composer input:focus-visible, .composer button:focus-visible, .persona:focus-visible {
+.composer input:focus-visible, .composer button:focus-visible {
   outline: 2px solid var(--phos); outline-offset: 2px;
 }
 
@@ -660,7 +652,7 @@ body {
 /* MCP trace switch, sitting in the assistant panel header. */
 /* Both header controls live in one flex row, anchored to the right of the
    panel header. Positioning them absolutely at fixed offsets made them overlap
-   as soon as the persona names rendered wider than the guessed gap. */
+   as soon as a control rendered wider than the guessed gap. */
 /* The title is centred and the controls were absolutely positioned on top
    of it, which worked at full width and collided the moment the chat pane
    became a 58% column. Flex row: title left, controls right, no overlap at
@@ -818,7 +810,6 @@ body {
 :root[data-phosphor="off"] .line.trace { font-size: .9rem; }
 :root[data-phosphor="off"] .composer input,
 :root[data-phosphor="off"] .composer .sigil { font-size: .95rem; }
-:root[data-phosphor="off"] .persona { font-size: .78rem; text-transform: none; }
 :root[data-phosphor="off"] .crt {
   background: linear-gradient(180deg, #101c20, #080f11);
   box-shadow:
